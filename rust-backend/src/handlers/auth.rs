@@ -18,6 +18,8 @@ pub async fn register(
     Json(payload): Json<RegisterRequest>,
 ) -> Result<(CookieJar, Json<serde_json::Value>), AppError> {
     validate_register(&payload)?;
+    let stellar = payload.stellar_public_key.trim();
+    let settlement = payload.settlement_public_key.trim();
     let client = state.pool.get().await?;
 
     let existing = client
@@ -32,6 +34,22 @@ pub async fn register(
         ));
     }
 
+    let keys_taken = client
+        .query_opt(
+            "SELECT 1 FROM merchants
+             WHERE stellar_public_key = $1
+                OR settlement_public_key = $1
+                OR stellar_public_key = $2
+                OR settlement_public_key = $2",
+            &[&stellar, &settlement],
+        )
+        .await?;
+    if keys_taken.is_some() {
+        return Err(AppError::conflict(
+            "One or both Stellar public keys are already registered on another merchant account. Each business and settlement key may only be linked once.",
+        ));
+    }
+
     let password_hash = hash_password(&payload.password)?;
     let row = client
         .query_one(
@@ -42,8 +60,8 @@ pub async fn register(
                 &payload.email.to_lowercase(),
                 &password_hash,
                 &payload.business_name,
-                &payload.stellar_public_key,
-                &payload.settlement_public_key,
+                &stellar,
+                &settlement,
             ],
         )
         .await?;
@@ -114,12 +132,14 @@ pub async fn me(
 }
 
 fn validate_register(payload: &RegisterRequest) -> Result<(), AppError> {
+    let stellar = payload.stellar_public_key.trim();
+    let settlement = payload.settlement_public_key.trim();
     if !payload.email.contains('@')
         || payload.password.len() < 8
         || payload.business_name.len() < 2
         || payload.business_name.len() > 120
-        || !is_public_key(&payload.stellar_public_key)
-        || !is_public_key(&payload.settlement_public_key)
+        || !is_public_key(stellar)
+        || !is_public_key(settlement)
     {
         return Err(AppError::bad_request("Invalid payload"));
     }
