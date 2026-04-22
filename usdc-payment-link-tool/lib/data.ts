@@ -154,3 +154,26 @@ export const markPayoutSettled = async (payoutId: string, invoiceId: string, txH
 export const markPayoutFailed = async (payoutId: string, reason: string) => {
   await query(`UPDATE payouts SET status = 'failed', failure_reason = $2, updated_at = NOW() WHERE id = $1`, [payoutId, reason.slice(0, 500)]);
 };
+
+/** Persists a reconcile/settle cron run for ops and debugging. Swallows DB errors so cron HTTP behavior is unchanged. */
+export const recordCronRun = async ({
+  jobType,
+  success,
+  metadata,
+  errorDetail,
+}: {
+  jobType: 'reconcile' | 'settle';
+  success: boolean;
+  metadata: Record<string, unknown>;
+  errorDetail?: string | null;
+}) => {
+  try {
+    await query(
+      `INSERT INTO cron_runs (job_type, started_at, finished_at, success, metadata, error_detail)
+       VALUES ($1, NOW(), NOW(), $2, $3::jsonb, $4)`,
+      [jobType, success, JSON.stringify(metadata), errorDetail ?? null],
+    );
+  } catch {
+    /* ignore audit failures */
+  }
+};

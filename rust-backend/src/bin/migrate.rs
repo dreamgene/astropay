@@ -33,7 +33,15 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     let migrations_dir = PathBuf::from("../usdc-payment-link-tool/migrations");
-    let mut files = fs::read_dir(migrations_dir)?
+    if !migrations_dir.is_dir() {
+        anyhow::bail!(
+            "migrations directory not found: {} (run from rust-backend/)",
+            migrations_dir.display()
+        );
+    }
+
+    let mut files = fs::read_dir(&migrations_dir)
+        .map_err(|e| anyhow::anyhow!("read_dir {}: {e}", migrations_dir.display()))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
@@ -55,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
 
         let sql = fs::read_to_string(&file)?;
         let transaction = client.transaction().await?;
-        transaction.batch_execute(&sql).await?;
+        transaction
+            .batch_execute(&sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("migration {name} failed: {e}"))?;
         transaction
             .execute("INSERT INTO schema_migrations (id) VALUES ($1)", &[&name])
             .await?;

@@ -17,6 +17,12 @@ What is intentionally not faked yet:
 
 Those routes return `501 Not Implemented` in the Rust service until the Stellar transaction logic is ported properly.
 
+## Cron run audit (`cron_runs`)
+
+Migration `004_cron_runs.sql` adds an append-only table keyed by `job_type` (`reconcile` \| `settle`) with JSONB `metadata` (response-shaped summary: `scanned` / `results` or `processed` / `results`) and optional `error_detail`. Successful Rust reconcile runs insert a row (if the handler returns `Ok` after scanning; Horizon or DB errors before that point skip audit persistence). Settle (still not implemented) inserts `success = false` with the error text before returning `501`. Audit insert failures are logged and do not change the HTTP status.
+
+**Verification:** `cargo test` checks that `004_cron_runs.sql` defines the table and index; apply migrations with `cargo run --bin migrate` before relying on audit rows in development.
+
 ## Run locally
 
 ```bash

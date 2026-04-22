@@ -53,6 +53,9 @@ Append-only audit trail for payment and settlement events.
 ### payouts
 Tracks merchant settlement jobs and outcomes.
 
+### cron_runs
+Append-only audit of each **`GET /api/cron/reconcile`** and **`GET /api/cron/settle`** run (after auth succeeds). `metadata` stores the same shape as the JSON response body (`scanned` + `results` or `processed` + `results`); `error_detail` is set when the handler returns `500` (for example DB or config errors). `recordCronRun` swallows insert failures so a broken audit table cannot break cron. Add retention or partitioning separately if volume grows.
+
 ## Invoice lifecycle
 
 - `pending` — created but not paid

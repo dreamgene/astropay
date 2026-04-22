@@ -1,8 +1,30 @@
+//! HTTP-facing models mapped from SQL rows.
+//!
+//! Cron HTTP responses are also summarized in the `cron_runs` audit table (see [`CronRun`]).
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_postgres::Row;
 use uuid::Uuid;
+
+/// One row per `/api/cron/reconcile` or `/api/cron/settle` invocation that reached the handler body.
+/// Used when listing audit rows from SQL; no dedicated HTTP route yet.
+#[allow(dead_code)]
+#[derive(Clone, Serialize)]
+pub struct CronRun {
+    pub id: Uuid,
+    #[serde(rename = "jobType")]
+    pub job_type: String,
+    #[serde(rename = "startedAt")]
+    pub started_at: DateTime<Utc>,
+    #[serde(rename = "finishedAt")]
+    pub finished_at: DateTime<Utc>,
+    pub success: bool,
+    pub metadata: Value,
+    #[serde(rename = "errorDetail")]
+    pub error_detail: Option<String>,
+}
 
 #[derive(Clone, Serialize)]
 pub struct Merchant {
@@ -133,6 +155,21 @@ impl Invoice {
             metadata: row.get("metadata"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl CronRun {
+    pub fn from_row(row: &Row) -> Self {
+        Self {
+            id: row.get("id"),
+            job_type: row.get("job_type"),
+            started_at: row.get("started_at"),
+            finished_at: row.get("finished_at"),
+            success: row.get("success"),
+            metadata: row.get("metadata"),
+            error_detail: row.get("error_detail"),
         }
     }
 }

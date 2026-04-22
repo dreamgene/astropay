@@ -1,7 +1,7 @@
 import { fail, ok } from '@/lib/http';
 import { assertSettlementConfig, env } from '@/lib/env';
 import { buildSettlementXdr, getServer } from '@/lib/stellar';
-import { getInvoiceById, markPayoutFailed, markPayoutSettled, markPayoutSubmitted, queuedPayouts } from '@/lib/data';
+import { getInvoiceById, markPayoutFailed, markPayoutSettled, markPayoutSubmitted, queuedPayouts, recordCronRun } from '@/lib/data';
 
 function authorized(request: Request) {
   const auth = request.headers.get('authorization');
@@ -11,25 +11,42 @@ function authorized(request: Request) {
 
 export async function GET(request: Request) {
   if (!authorized(request)) return fail('Unauthorized', 401);
-  assertSettlementConfig();
-  const payouts = await queuedPayouts();
+  let processed = 0;
   const results: Array<Record<string, unknown>> = [];
+  let success = true;
+  let errorDetail: string | null = null;
+  try {
+    assertSettlementConfig();
+    const payouts = await queuedPayouts();
+    processed = payouts.length;
 
-  for (const payout of payouts) {
-    try {
-      const invoice = await getInvoiceById(payout.invoice_id_ref);
-      if (!invoice || invoice.status !== 'paid') continue;
-      const tx = await buildSettlementXdr({ invoice, destination: payout.destination_public_key });
-      const submission = await getServer().submitTransaction(tx);
-      await markPayoutSubmitted(payout.id, submission.hash);
-      await markPayoutSettled(payout.id, payout.invoice_id_ref, submission.hash);
-      results.push({ payoutId: payout.id, action: 'settled', txHash: submission.hash });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Settlement failed';
-      await markPayoutFailed(payout.id, message);
-      results.push({ payoutId: payout.id, action: 'failed', reason: message });
+    for (const payout of payouts) {
+      try {
+        const invoice = await getInvoiceById(payout.invoice_id_ref);
+        if (!invoice || invoice.status !== 'paid') continue;
+        const tx = await buildSettlementXdr({ invoice, destination: payout.destination_public_key });
+        const submission = await getServer().submitTransaction(tx);
+        await markPayoutSubmitted(payout.id, submission.hash);
+        await markPayoutSettled(payout.id, payout.invoice_id_ref, submission.hash);
+        results.push({ payoutId: payout.id, action: 'settled', txHash: submission.hash });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Settlement failed';
+        await markPayoutFailed(payout.id, message);
+        results.push({ payoutId: payout.id, action: 'failed', reason: message });
+      }
     }
-  }
 
-  return ok({ processed: payouts.length, results });
+    return ok({ processed, results });
+  } catch (error) {
+    success = false;
+    errorDetail = error instanceof Error ? error.message : 'settle failed';
+    return fail(errorDetail, 500);
+  } finally {
+    await recordCronRun({
+      jobType: 'settle',
+      success,
+      metadata: { processed, results },
+      errorDetail,
+    });
+  }
 }
