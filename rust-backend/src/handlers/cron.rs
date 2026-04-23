@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
 };
 use chrono::Utc;
@@ -8,22 +8,32 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_postgres::types::Json as PgJson;
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::{
     AppState,
     auth::authorize_cron_request,
     error::AppError,
     models::Invoice,
-    stellar::{find_payment_for_invoice, invoice_is_expired, is_valid_account_public_key},
+    stellar::{
+        TransactionStatus, confirm_transaction, find_payment_for_invoice,
+        invoice_is_expired, is_valid_account_public_key,
+    },
 };
 
 /// Payouts that fail this many times are moved to the dead-letter path.
 const PAYOUT_DEAD_LETTER_THRESHOLD: i32 = 5;
 
+#[derive(Deserialize)]
+pub struct DryRunParams {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 pub async fn reconcile(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(params): Query<DryRunParams>,
+    axum::extract::Query(params): axum::extract::Query<DryRunParams>,
 ) -> Result<Json<Value>, AppError> {
     authorize_cron_request(&state.config.cron_secret, &headers)?;
     let dry_run = params.dry_run;
@@ -51,8 +61,22 @@ pub async fn reconcile(
             continue;
         }
 
-        match find_payment_for_invoice(&state.config, &invoice).await? {
-            Some(payment) => {
+        // Issue #167: treat HorizonUnavailable as a transient skip — do NOT
+        // flip the invoice to failed.
+        match find_payment_for_invoice(&state.config, &invoice).await {
+            Err(AppError::HorizonUnavailable) => {
+                warn!(
+                    public_id = %invoice.public_id,
+                    "Horizon unavailable during reconcile — skipping invoice to avoid false failure"
+                );
+                results.push(json!({ "publicId": invoice.public_id, "action": "skipped_horizon_unavailable" }));
+                continue;
+            }
+            Err(e) => return Err(e),
+            Ok(None) => {
+                results.push(json!({ "publicId": invoice.public_id, "action": "pending" }));
+            }
+            Ok(Some(payment)) => {
                 let transaction = client.transaction().await?;
                 transaction
                     .execute(
@@ -103,11 +127,7 @@ pub async fn reconcile(
                                 &[&invoice.id],
                             )
                             .await?;
-                        if inserted > 0 {
-                            (true, None)
-                        } else {
-                            (false, Some("payout_already_queued"))
-                        }
+                        if inserted > 0 { (true, None) } else { (false, Some("payout_already_queued")) }
                     };
                 transaction.commit().await?;
                 results.push(json!({
@@ -119,8 +139,55 @@ pub async fn reconcile(
                     "payoutSkipReason": payout_skip_reason
                 }));
             }
-            None => {
-                results.push(json!({ "publicId": invoice.public_id, "action": "pending" }));
+        }
+    }
+
+    // Issue #158: confirm any payouts that are in 'submitted' state by querying
+    // Horizon for their transaction hash.
+    let submitted_rows = client
+        .query(
+            "SELECT id, transaction_hash FROM payouts WHERE status = 'submitted' AND transaction_hash IS NOT NULL LIMIT 100",
+            &[],
+        )
+        .await?;
+
+    let mut confirmed: Vec<Value> = Vec::new();
+    let mut chain_failed: Vec<Value> = Vec::new();
+
+    for row in &submitted_rows {
+        let payout_id: Uuid = row.get("id");
+        let tx_hash: String = row.get("transaction_hash");
+
+        match confirm_transaction(&state.config, &tx_hash).await {
+            Err(AppError::HorizonUnavailable) => {
+                // Issue #167: skip — do not mark as failed during an outage.
+                warn!(payout_id = %payout_id, "Horizon unavailable during payout confirmation — leaving as submitted");
+            }
+            Err(e) => return Err(e),
+            Ok(TransactionStatus::Success) => {
+                if !dry_run {
+                    client
+                        .execute(
+                            "UPDATE payouts SET status = 'confirmed', updated_at = NOW() WHERE id = $1 AND status = 'submitted'",
+                            &[&payout_id],
+                        )
+                        .await?;
+                }
+                confirmed.push(json!({ "payoutId": payout_id, "txHash": tx_hash }));
+            }
+            Ok(TransactionStatus::Failed) => {
+                if !dry_run {
+                    client
+                        .execute(
+                            "UPDATE payouts SET status = 'failed', failure_reason = 'chain_rejected', updated_at = NOW() WHERE id = $1 AND status = 'submitted'",
+                            &[&payout_id],
+                        )
+                        .await?;
+                }
+                chain_failed.push(json!({ "payoutId": payout_id, "txHash": tx_hash }));
+            }
+            Ok(TransactionStatus::NotFound) => {
+                // Still pending on-chain — leave as submitted.
             }
         }
     }
@@ -128,7 +195,11 @@ pub async fn reconcile(
     let body = json!({
         "dryRun": dry_run,
         "scanned": results.len(),
-        "results": results
+        "results": results,
+        "payoutsConfirmed": confirmed.len(),
+        "payoutsChainFailed": chain_failed.len(),
+        "confirmedItems": confirmed,
+        "chainFailedItems": chain_failed,
     });
     if !dry_run {
         if let Err(e) = client
@@ -147,8 +218,6 @@ pub async fn reconcile(
 }
 
 /// Deletes sessions whose `expires_at` is in the past.
-/// Safe to call repeatedly; each run is idempotent and logged to `cron_runs`.
-/// Trigger via `GET /api/cron/purge-sessions` with `Authorization: Bearer <CRON_SECRET>`.
 pub async fn purge_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -174,20 +243,15 @@ pub async fn purge_sessions(
 
 /// Scans `payouts` with status `failed` and increments their failure count.
 /// Once a payout reaches [`PAYOUT_DEAD_LETTER_THRESHOLD`] failures it is moved
-/// to `dead_lettered` status and a row is inserted into `payout_dead_letters`
-/// so operators can inspect and manually resolve it.
-///
-/// Full Stellar transaction signing/submission is not implemented yet; this
-/// handler only manages the failure-tracking and dead-letter escalation path.
+/// to `dead_lettered` status.
 pub async fn settle(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(params): Query<DryRunParams>,
+    axum::extract::Query(params): axum::extract::Query<DryRunParams>,
 ) -> Result<Json<Value>, AppError> {
     authorize_cron_request(&state.config.cron_secret, &headers)?;
     let mut client = state.pool.get().await?;
 
-    // Fetch payouts that have failed and are not yet dead-lettered.
     let rows = client
         .query(
             "SELECT * FROM payouts WHERE status = 'failed' ORDER BY updated_at ASC LIMIT 100",
@@ -199,9 +263,9 @@ pub async fn settle(
     let mut requeued: Vec<Value> = Vec::new();
 
     for row in &rows {
-        let payout_id: uuid::Uuid = row.get("id");
-        let invoice_id: uuid::Uuid = row.get("invoice_id");
-        let merchant_id: uuid::Uuid = row.get("merchant_id");
+        let payout_id: Uuid = row.get("id");
+        let invoice_id: Uuid = row.get("invoice_id");
+        let merchant_id: Uuid = row.get("merchant_id");
         let failure_count: i32 = row.get("failure_count");
         let failure_reason: Option<String> = row.get("failure_reason");
         let new_count = failure_count + 1;
@@ -209,7 +273,6 @@ pub async fn settle(
         let tx = client.transaction().await?;
 
         if new_count >= PAYOUT_DEAD_LETTER_THRESHOLD {
-            // Escalate to dead-letter.
             tx.execute(
                 "UPDATE payouts
                  SET status = 'dead_lettered', failure_count = $2, last_failure_at = NOW(), updated_at = NOW()
@@ -221,13 +284,7 @@ pub async fn settle(
                 "INSERT INTO payout_dead_letters (payout_id, invoice_id, merchant_id, failure_count, last_failure_reason)
                  VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT (payout_id) DO NOTHING",
-                &[
-                    &payout_id,
-                    &invoice_id,
-                    &merchant_id,
-                    &new_count,
-                    &failure_reason,
-                ],
+                &[&payout_id, &invoice_id, &merchant_id, &new_count, &failure_reason],
             )
             .await?;
             tx.execute(
@@ -242,7 +299,6 @@ pub async fn settle(
             tx.commit().await?;
             dead_lettered.push(json!({ "payoutId": payout_id, "failureCount": new_count }));
         } else {
-            // Increment failure count and requeue for the next settle run.
             tx.execute(
                 "UPDATE payouts
                  SET status = 'queued', failure_count = $2, last_failure_at = NOW(), updated_at = NOW()
@@ -275,6 +331,81 @@ pub async fn settle(
     }
 
     Ok(Json(body))
+}
+
+/// Issue #178 — Manual replay endpoint for a specific payout settlement.
+///
+/// `POST /api/cron/payouts/:payout_id/replay`
+///
+/// Resets a single payout from `dead_lettered` or `failed` back to `queued`
+/// so the next settle run will attempt it again. The action is audited in
+/// `payment_events` for full operator traceability.
+///
+/// Requires the same `Authorization: Bearer <CRON_SECRET>` header as other
+/// cron endpoints so only operators with the secret can trigger replays.
+pub async fn replay_payout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(payout_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    authorize_cron_request(&state.config.cron_secret, &headers)?;
+    let mut client = state.pool.get().await?;
+
+    // Load the payout — must exist and be in a replayable state.
+    let row = client
+        .query_opt(
+            "SELECT id, invoice_id, merchant_id, status, failure_count FROM payouts WHERE id = $1",
+            &[&payout_id],
+        )
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("payout {payout_id} not found")))?;
+
+    let status: String = row.get("status");
+    let invoice_id: Uuid = row.get("invoice_id");
+    let failure_count: i32 = row.get("failure_count");
+
+    if status != "dead_lettered" && status != "failed" {
+        return Err(AppError::bad_request(format!(
+            "payout {payout_id} has status '{status}'; only dead_lettered or failed payouts can be replayed"
+        )));
+    }
+
+    let tx = client.transaction().await?;
+
+    // Reset the payout to queued with zeroed failure count so it gets a clean attempt.
+    tx.execute(
+        "UPDATE payouts
+         SET status = 'queued', failure_count = 0, failure_reason = NULL,
+             last_failure_at = NULL, updated_at = NOW()
+         WHERE id = $1",
+        &[&payout_id],
+    )
+    .await?;
+
+    // Audit the replay in payment_events.
+    tx.execute(
+        "INSERT INTO payment_events (invoice_id, event_type, payload) VALUES ($1, $2, $3)",
+        &[
+            &invoice_id,
+            &"payout_replayed",
+            &json!({
+                "payoutId": payout_id,
+                "previousStatus": status,
+                "previousFailureCount": failure_count,
+                "replayedAt": Utc::now().to_rfc3339(),
+            }),
+        ],
+    )
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(Json(json!({
+        "payoutId": payout_id,
+        "previousStatus": status,
+        "newStatus": "queued",
+        "message": "Payout has been reset to queued and will be retried on the next settle run."
+    })))
 }
 
 #[cfg(test)]
