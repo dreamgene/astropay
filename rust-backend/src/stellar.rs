@@ -59,6 +59,9 @@ pub fn invoice_amount_to_asset(invoice: &Invoice) -> String {
     format!("{:.2}", invoice.gross_amount_cents as f64 / 100.0)
 }
 
+/// Returns true when the Horizon payment record matches the invoice on all five criteria:
+/// destination key, asset code, asset issuer, gross amount (two decimal places), and memo.
+/// Both `to` and `account` fields are checked to handle path-payment vs direct-payment shapes.
 pub fn payment_matches_invoice(record: &serde_json::Value, memo: &str, invoice: &Invoice) -> bool {
     let destination = record
         .get("to")
@@ -85,6 +88,15 @@ pub fn payment_matches_invoice(record: &serde_json::Value, memo: &str, invoice: 
         && memo == invoice.memo
 }
 
+/// Queries Horizon for the most recent 50 payment operations on the invoice destination account
+/// and returns the first one that matches all of: destination key, asset code, asset issuer,
+/// gross amount (formatted to two decimal places), and transaction memo.
+///
+/// Returns `None` if no matching payment is found in that window.
+/// Returns `Err(AppError::Internal)` if the Horizon HTTP call or JSON parse fails.
+///
+/// **Limit**: only the 50 most recent operations are inspected. Payments older than that window
+/// will not be detected. Use the replay endpoint to rescan a specific invoice manually.
 pub async fn find_payment_for_invoice(
     config: &Config,
     invoice: &Invoice,
