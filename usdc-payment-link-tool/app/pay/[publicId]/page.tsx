@@ -14,8 +14,11 @@ export default async function PayPage({ params }: { params: Promise<{ publicId: 
       <div className="card stack">
         <div className="badge">Pay {invoice.business_name}</div>
         <h1 style={{ margin: 0 }}>{invoice.description}</h1>
-        <p>Amount: <strong>{centsToUsd(invoice.gross_amount_cents)}</strong></p>
-        <p className="muted">USDC on Stellar</p>
+        <p>You pay: <strong>{centsToUsd(invoice.gross_amount_cents)} USDC</strong></p>
+        {invoice.platform_fee_cents > 0 && (
+          <p className="muted small">Includes {centsToUsd(invoice.platform_fee_cents)} platform fee — merchant receives {centsToUsd(invoice.net_amount_cents)}</p>
+        )}
+        <p className="muted small">Payment is processed by ASTROpay on Stellar and settled to the merchant after confirmation.</p>
         <p className="muted">Expires: {isoToLocal(invoice.expires_at)}</p>
         <div className="copy-row"><span className="muted">Memo:</span><span className="mono muted">{invoice.memo}</span><CopyButton value={invoice.memo} /></div>
         <div className="copy-row"><span className="muted">Destination:</span><span className="mono muted">{invoice.destination_public_key}</span><CopyButton value={invoice.destination_public_key} /></div>
