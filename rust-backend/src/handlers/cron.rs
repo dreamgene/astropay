@@ -4,6 +4,7 @@ use axum::{
     http::HeaderMap,
 };
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_postgres::types::Json as PgJson;
 use tracing::warn;
@@ -22,8 +23,10 @@ const PAYOUT_DEAD_LETTER_THRESHOLD: i32 = 5;
 pub async fn reconcile(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<DryRunParams>,
 ) -> Result<Json<Value>, AppError> {
     authorize_cron_request(&state.config.cron_secret, &headers)?;
+    let dry_run = params.dry_run;
     let mut client = state.pool.get().await?;
     let rows = client
         .query(
@@ -36,12 +39,14 @@ pub async fn reconcile(
 
     for invoice in invoices {
         if invoice_is_expired(&invoice, Utc::now()) {
-            client
-                .execute(
-                    "UPDATE invoices SET status = 'expired', updated_at = NOW() WHERE id = $1 AND status = 'pending'",
-                    &[&invoice.id],
-                )
-                .await?;
+            if !dry_run {
+                client
+                    .execute(
+                        "UPDATE invoices SET status = 'expired', updated_at = NOW() WHERE id = $1 AND status = 'pending'",
+                        &[&invoice.id],
+                    )
+                    .await?;
+            }
             results.push(json!({ "publicId": invoice.public_id, "action": "expired" }));
             continue;
         }
@@ -121,18 +126,21 @@ pub async fn reconcile(
     }
 
     let body = json!({
+        "dryRun": dry_run,
         "scanned": results.len(),
         "results": results
     });
-    if let Err(e) = client
-        .execute(
-            "INSERT INTO cron_runs (job_type, started_at, finished_at, success, metadata, error_detail)
-             VALUES ('reconcile', NOW(), NOW(), true, $1, NULL)",
-            &[&PgJson(&body)],
-        )
-        .await
-    {
-        warn!(error = %e, "cron_runs audit insert failed for reconcile");
+    if !dry_run {
+        if let Err(e) = client
+            .execute(
+                "INSERT INTO cron_runs (job_type, started_at, finished_at, success, metadata, error_detail)
+                 VALUES ('reconcile', NOW(), NOW(), true, $1, NULL)",
+                &[&PgJson(&body)],
+            )
+            .await
+        {
+            warn!(error = %e, "cron_runs audit insert failed for reconcile");
+        }
     }
 
     Ok(Json(body))
@@ -148,6 +156,7 @@ pub async fn reconcile(
 pub async fn settle(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<DryRunParams>,
 ) -> Result<Json<Value>, AppError> {
     authorize_cron_request(&state.config.cron_secret, &headers)?;
     let mut client = state.pool.get().await?;
