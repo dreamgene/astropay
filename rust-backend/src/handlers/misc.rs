@@ -6,6 +6,9 @@ use crate::{
     auth::authorize_cron_request,
     error::AppError,
     models::StellarWebhookRequest,
+    money_state::{
+        INVOICE_ALREADY_TRANSITIONED_REASON, InvoicePaidOutcome, mark_invoice_paid_and_queue_payout,
+    },
     stellar::is_valid_account_public_key,
 };
 
@@ -55,12 +58,19 @@ pub async fn stellar_webhook(
     };
 
     let invoice_id: uuid::Uuid = row.get("id");
-    let status: String = row.get("status");
+    let mut status: String = row.get("status");
     let mut payout_queued: Option<bool> = None;
     let mut payout_skip_reason: Option<&'static str> = None;
 
     if status == "pending" {
         let transaction = client.transaction().await?;
+        let outcome = mark_invoice_paid_and_queue_payout(
+            &transaction,
+            invoice_id,
+            &payload.transaction_hash,
+            &payload.rest,
+        )
+        .await?;
 
         let updated = transaction
             .execute(
@@ -150,6 +160,24 @@ pub async fn stellar_webhook(
         payout_queued = Some(queued);
         payout_skip_reason = skip;
         transaction.commit().await?;
+        match outcome {
+            InvoicePaidOutcome::Applied {
+                payout_queued: queued,
+                payout_skip_reason: skip,
+            } => {
+                status = "paid".to_string();
+                payout_queued = Some(queued);
+                payout_skip_reason = skip.map(|reason| reason.as_str());
+            }
+            InvoicePaidOutcome::AlreadyTransitioned => {
+                let refreshed = client
+                    .query_one("SELECT status FROM invoices WHERE id = $1", &[&invoice_id])
+                    .await?;
+                status = refreshed.get("status");
+                payout_queued = Some(false);
+                payout_skip_reason = Some(INVOICE_ALREADY_TRANSITIONED_REASON);
+            }
+        }
     }
 
     Ok(Json(json!({

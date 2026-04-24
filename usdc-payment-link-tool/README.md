@@ -173,7 +173,7 @@ Those still need a proper Stellar transaction port and currently return `501 Not
 
 When an invoice is marked paid, the server validates the merchant `settlement_public_key` as a Stellar Ed25519 account strkey (checksum-valid `G...`) before inserting a `payouts` row. If the key is missing or invalid, the invoice still becomes paid (funds were received on-chain), but no payout is queued; a `payment_events` row is written with `event_type = payout_skipped_invalid_destination` instead.
 
-Successful reconcile entries for paid invoices include `payoutQueued` (boolean) and `payoutSkipReason` (`null`, `invalid_settlement_public_key`, or `payout_already_queued` when the payout row already existed). The Stellar webhook response includes the same `payoutQueued` / `payoutSkipReason` fields when it transitions an invoice from `pending` to `paid`.
+Successful reconcile entries for paid invoices include `payoutQueued` (boolean) and `payoutSkipReason` (`null`, `invalid_settlement_public_key`, or `payout_already_queued` when the payout row already existed). If another worker wins the same `pending` to `paid` race, the Rust path reports `invoice_already_transitioned` and does not write duplicate payment events or payouts. The Stellar webhook response includes the same `payoutQueued` / `payoutSkipReason` fields when it transitions an invoice from `pending` to `paid`.
 
 The settlement cron rejects queued payouts whose stored `destination_public_key` fails the same validation and marks them failed so they are not submitted to Horizon.
 

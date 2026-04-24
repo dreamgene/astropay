@@ -12,6 +12,15 @@ What it currently owns:
 
 Reconciliation and the Stellar webhook validate each merchant `settlement_public_key` with Stellar strkey decoding before inserting into `payouts`. Invalid keys skip payout queueing (invoice still marked paid) and emit a `payment_events` row with `event_type = payout_skipped_invalid_destination`. Run `cargo test` for strkey coverage.
 
+## Invoice-paid / payout-queued isolation
+
+The Rust reconcile, replay, and Stellar webhook paths share one money-state helper for marking an invoice paid and queueing its payout. The helper runs inside a single Postgres transaction and uses `UPDATE invoices ... WHERE id = $1 AND status = 'pending'` as a compare-and-set boundary. If a concurrent worker already moved the invoice out of `pending`, the update affects zero rows and the helper does not insert a `payment_events` row or a `payouts` row.
+
+Payout queueing remains idempotent through the `payouts.invoice_id` unique constraint and `ON CONFLICT (invoice_id) DO NOTHING`. The payout destination is the exact `settlement_public_key` value validated in the transaction, so the queued payout cannot drift to a different merchant key between validation and insert.
+
+Concurrent losers report `invoice_already_transitioned` as the skip reason instead of writing duplicate money-state side effects.
+
+**Verify:** `cargo test money_state` covers the row-count contract, stable skip reason strings, and the documented isolation expectations.
 ## Reconciliation and settle pagination
 
 Both cron handlers process the **full backlog** in a single invocation using keyset pagination — there is no arbitrary row cap.

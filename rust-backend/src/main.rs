@@ -5,6 +5,7 @@ mod error;
 mod handlers;
 mod login_rate_limit;
 mod models;
+mod money_state;
 mod settle;
 mod stellar;
 
@@ -69,6 +70,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/cron/reconcile", get(handlers::cron::reconcile))
         .route("/api/cron/settle", get(handlers::cron::settle))
+        .route(
+            "/api/cron/purge-sessions",
+            get(handlers::cron::purge_sessions),
+        )
         .route("/api/cron/purge-sessions", get(handlers::cron::purge_sessions))
         .route("/api/cron/payouts/:payout_id/replay", axum::routing::post(handlers::cron::replay_payout))
         .route("/api/cron/orphan-payments", get(handlers::cron::orphan_payments))
