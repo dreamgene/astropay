@@ -5,7 +5,7 @@ use deadpool_postgres::GenericClient;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::{RngCore, rngs::OsRng};
 use scrypt::{
-    Scrypt,
+    Params, Scrypt,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use uuid::Uuid;
@@ -19,7 +19,9 @@ use crate::{
 /// Validates `Authorization: Bearer <token>` for cron and webhook routes.
 pub fn authorize_cron_request(cron_secret: &str, headers: &HeaderMap) -> Result<(), AppError> {
     if cron_secret.is_empty() {
-        return Err(AppError::unauthorized_code(AuthErrorCode::CronSecretMismatch));
+        return Err(AppError::unauthorized_code(
+            AuthErrorCode::CronSecretMismatch,
+        ));
     }
     let token = headers
         .get(header::AUTHORIZATION)
@@ -28,7 +30,9 @@ pub fn authorize_cron_request(cron_secret: &str, headers: &HeaderMap) -> Result<
     if token == Some(cron_secret) {
         Ok(())
     } else {
-        Err(AppError::unauthorized_code(AuthErrorCode::CronSecretMismatch))
+        Err(AppError::unauthorized_code(
+            AuthErrorCode::CronSecretMismatch,
+        ))
     }
 }
 
@@ -41,9 +45,9 @@ pub fn wallet_keys_conflict_with_existing(
     stellar: &str,
     settlement: &str,
 ) -> bool {
-    existing.iter().any(|(es, et)| {
-        *es == stellar || *es == settlement || *et == stellar || *et == settlement
-    })
+    existing
+        .iter()
+        .any(|(es, et)| *es == stellar || *es == settlement || *et == stellar || *et == settlement)
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -54,9 +58,13 @@ struct Claims {
 }
 
 pub fn hash_password(password: &str) -> Result<String, AppError> {
+    hash_password_with_params(password, Params::recommended())
+}
+
+fn hash_password_with_params(password: &str, params: Params) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut rand::thread_rng());
     Scrypt
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password_customized(password.as_bytes(), None, None, params, &salt)
         .map(|hash| hash.to_string())
         .map_err(|_| AppError::Internal)
 }
@@ -213,10 +221,11 @@ fn session_cookie(config: &Config, token: String) -> Cookie<'static> {
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
+    use scrypt::Params;
 
     use super::{
-        authorize_cron_request, generate_memo, generate_public_id, hash_password, session_cookie,
-        verify_password, wallet_keys_conflict_with_existing,
+        authorize_cron_request, generate_memo, generate_public_id, hash_password_with_params,
+        session_cookie, verify_password, wallet_keys_conflict_with_existing,
     };
     use crate::config::Config;
 
@@ -281,19 +290,33 @@ mod tests {
     #[test]
     fn session_cookie_secure_flag_set_when_config_is_true() {
         let cookie = session_cookie(&secure_config(), "tok".to_string());
-        assert!(cookie.secure().unwrap_or(false), "secure flag must be set for https config");
+        assert!(
+            cookie.secure().unwrap_or(false),
+            "secure flag must be set for https config"
+        );
     }
 
     #[test]
     fn session_cookie_secure_flag_unset_when_config_is_false() {
         let cookie = session_cookie(&insecure_config(), "tok".to_string());
-        assert!(!cookie.secure().unwrap_or(true), "secure flag must be absent for http config");
+        assert!(
+            !cookie.secure().unwrap_or(true),
+            "secure flag must be absent for http config"
+        );
     }
 
     #[test]
     fn session_cookie_is_always_http_only() {
-        assert!(session_cookie(&secure_config(), "t".to_string()).http_only().unwrap_or(false));
-        assert!(session_cookie(&insecure_config(), "t".to_string()).http_only().unwrap_or(false));
+        assert!(
+            session_cookie(&secure_config(), "t".to_string())
+                .http_only()
+                .unwrap_or(false)
+        );
+        assert!(
+            session_cookie(&insecure_config(), "t".to_string())
+                .http_only()
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -307,7 +330,8 @@ mod tests {
 
     #[test]
     fn hash_and_verify_round_trip() {
-        let hashed = hash_password("correct horse battery staple").unwrap();
+        let params = Params::new(10, 1, 1, 32).unwrap();
+        let hashed = hash_password_with_params("correct horse battery staple", params).unwrap();
         assert!(verify_password("correct horse battery staple", &hashed));
         assert!(!verify_password("wrong-password", &hashed));
     }
@@ -329,36 +353,11 @@ mod tests {
     #[test]
     fn authorize_cron_accepts_matching_bearer() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer mysecret"));
-        assert!(authorize_cron_request("mysecret", &headers).is_ok());
-    }
-
-    #[test]
-    fn authorize_cron_rejects_wrong_bearer() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer wrong"));
-        assert!(authorize_cron_request("cron_secret", &headers).is_err());
-    }
-
-    #[test]
-    fn authorize_cron_rejects_when_secret_not_configured() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer anything"));
-        assert!(authorize_cron_request("", &headers).is_err());
-    }
-
-    #[test]
-    fn authorize_cron_rejects_missing_header() {
-        assert!(authorize_cron_request("secret", &HeaderMap::new()).is_err());
-    }
-
-    // --- wallet key conflict ---
-
         headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer x"),
+            HeaderValue::from_static("Bearer mysecret"),
         );
-        assert!(authorize_cron_request("", &headers).is_err());
+        assert!(authorize_cron_request("mysecret", &headers).is_ok());
     }
 
     #[test]
@@ -380,6 +379,13 @@ mod tests {
         );
         assert!(authorize_cron_request("", &headers).is_err());
     }
+
+    #[test]
+    fn authorize_cron_rejects_missing_header() {
+        assert!(authorize_cron_request("secret", &HeaderMap::new()).is_err());
+    }
+
+    // --- wallet key conflict ---
 
     #[test]
     fn wallet_conflict_detects_stellar_reuse() {

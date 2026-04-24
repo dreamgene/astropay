@@ -91,7 +91,9 @@ pub fn validate_settle_transition(
     }
 
     match PayoutStatus::from_str(payout_status) {
-        Some(PayoutStatus::Settled) | Some(PayoutStatus::Failed) | Some(PayoutStatus::DeadLettered) => {
+        Some(PayoutStatus::Settled)
+        | Some(PayoutStatus::Failed)
+        | Some(PayoutStatus::DeadLettered) => {
             return Err(SettleError::PayoutAlreadyTerminal {
                 actual: payout_status.to_string(),
             });

@@ -37,7 +37,10 @@ pub struct UnauthorizedError {
 
 impl UnauthorizedError {
     pub fn new(code: AuthErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     pub fn from_code(code: AuthErrorCode) -> Self {
@@ -64,9 +67,6 @@ pub enum AppError {
     Unauthorized(UnauthorizedError),
     #[error("Too many login attempts")]
     RateLimited { retry_after_seconds: u64 },
-    RateLimited {
-        retry_after_seconds: u64,
-    },
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
@@ -110,7 +110,9 @@ impl AppError {
     }
 
     pub fn rate_limited(retry_after_seconds: u64) -> Self {
-        Self::RateLimited { retry_after_seconds }
+        Self::RateLimited {
+            retry_after_seconds,
+        }
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
@@ -129,7 +131,9 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
-            Self::RateLimited { retry_after_seconds } => {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => {
                 let body = RateLimitedBody {
                     error: RateLimitedInner {
                         code: "AUTH_RATE_LIMITED",
@@ -171,7 +175,6 @@ impl IntoResponse for AppError {
                 .into_response(),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(LegacyErrorBody { error: "Unexpected error".to_string() }),
                 Json(LegacyErrorBody {
                     error: "Unexpected error".to_string(),
                 }),

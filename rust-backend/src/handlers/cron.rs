@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
 };
 use chrono::Utc;
@@ -14,11 +14,28 @@ use crate::{
     auth::authorize_cron_request,
     error::AppError,
     models::Invoice,
-    stellar::{find_payment_for_invoice, invoice_is_expired, is_valid_account_public_key},
+    money_state::{
+        INVOICE_ALREADY_TRANSITIONED_REASON, InvoicePaidOutcome, mark_invoice_paid_and_queue_payout,
+    },
+    stellar::{find_payment_for_invoice, invoice_is_expired},
 };
 
 /// Payouts that fail this many times are moved to the dead-letter path.
 const PAYOUT_DEAD_LETTER_THRESHOLD: i32 = 5;
+
+#[derive(Debug, Deserialize)]
+pub struct DryRunParams {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplayRequest {
+    #[serde(rename = "publicId")]
+    public_id: String,
+    #[serde(default)]
+    dry_run: bool,
+}
 
 pub async fn reconcile(
     State(state): State<AppState>,
@@ -54,70 +71,32 @@ pub async fn reconcile(
         match find_payment_for_invoice(&state.config, &invoice).await? {
             Some(payment) => {
                 let transaction = client.transaction().await?;
-                transaction
-                    .execute(
-                        "UPDATE invoices
-                         SET status = 'paid', paid_at = NOW(), transaction_hash = $2, updated_at = NOW()
-                         WHERE id = $1 AND status = 'pending'",
-                        &[&invoice.id, &payment.hash],
-                    )
-                    .await?;
-                transaction
-                    .execute(
-                        "INSERT INTO payment_events (invoice_id, event_type, payload) VALUES ($1, $2, $3)",
-                        &[&invoice.id, &"payment_detected", &payment.payment],
-                    )
-                    .await?;
-                let settlement_row = transaction
-                    .query_opt(
-                        "SELECT m.settlement_public_key
-                         FROM merchants m
-                         INNER JOIN invoices i ON i.merchant_id = m.id
-                         WHERE i.id = $1",
-                        &[&invoice.id],
-                    )
-                    .await?;
-                let settlement_key: Option<String> = settlement_row.map(|row| row.get(0));
-                let settlement_key = settlement_key.unwrap_or_default();
-                let (payout_queued, payout_skip_reason) =
-                    if !is_valid_account_public_key(&settlement_key) {
-                        transaction
-                            .execute(
-                                "INSERT INTO payment_events (invoice_id, event_type, payload) VALUES ($1, $2, $3)",
-                                &[
-                                    &invoice.id,
-                                    &"payout_skipped_invalid_destination",
-                                    &json!({ "reason": "invalid_settlement_public_key" }),
-                                ],
-                            )
-                            .await?;
-                        (false, Some("invalid_settlement_public_key"))
-                    } else {
-                        let inserted = transaction
-                            .execute(
-                                "INSERT INTO payouts (invoice_id, merchant_id, destination_public_key, amount_cents, asset_code, asset_issuer)
-                                 SELECT id, merchant_id, (SELECT settlement_public_key FROM merchants WHERE merchants.id = invoices.merchant_id),
-                                        net_amount_cents, asset_code, asset_issuer
-                                 FROM invoices WHERE id = $1
-                                 ON CONFLICT (invoice_id) DO NOTHING",
-                                &[&invoice.id],
-                            )
-                            .await?;
-                        if inserted > 0 {
-                            (true, None)
-                        } else {
-                            (false, Some("payout_already_queued"))
-                        }
-                    };
+                let outcome = mark_invoice_paid_and_queue_payout(
+                    &transaction,
+                    invoice.id,
+                    &payment.hash,
+                    &payment.payment,
+                )
+                .await?;
                 transaction.commit().await?;
-                results.push(json!({
-                    "publicId": invoice.public_id,
-                    "action": "paid",
-                    "txHash": payment.hash,
-                    "memo": payment.memo,
-                    "payoutQueued": payout_queued,
-                    "payoutSkipReason": payout_skip_reason
-                }));
+                match outcome {
+                    InvoicePaidOutcome::Applied {
+                        payout_queued,
+                        payout_skip_reason,
+                    } => results.push(json!({
+                        "publicId": invoice.public_id,
+                        "action": "paid",
+                        "txHash": payment.hash,
+                        "memo": payment.memo,
+                        "payoutQueued": payout_queued,
+                        "payoutSkipReason": payout_skip_reason.map(|reason| reason.as_str())
+                    })),
+                    InvoicePaidOutcome::AlreadyTransitioned => results.push(json!({
+                        "publicId": invoice.public_id,
+                        "action": "skipped",
+                        "reason": INVOICE_ALREADY_TRANSITIONED_REASON
+                    })),
+                }
             }
             None => {
                 results.push(json!({ "publicId": invoice.public_id, "action": "pending" }));
@@ -182,7 +161,7 @@ pub async fn purge_sessions(
 pub async fn settle(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(params): Query<DryRunParams>,
+    Query(_params): Query<DryRunParams>,
 ) -> Result<Json<Value>, AppError> {
     authorize_cron_request(&state.config.cron_secret, &headers)?;
     let mut client = state.pool.get().await?;
@@ -345,68 +324,34 @@ pub async fn replay_invoice(
             }
 
             let transaction = client.transaction().await?;
-            transaction
-                .execute(
-                    "UPDATE invoices
-                     SET status = 'paid', paid_at = NOW(), transaction_hash = $2, updated_at = NOW()
-                     WHERE id = $1 AND status = 'pending'",
-                    &[&invoice.id, &payment.hash],
-                )
-                .await?;
-            transaction
-                .execute(
-                    "INSERT INTO payment_events (invoice_id, event_type, payload) VALUES ($1, $2, $3)",
-                    &[&invoice.id, &"payment_detected", &payment.payment],
-                )
-                .await?;
-            let settlement_row = transaction
-                .query_opt(
-                    "SELECT m.settlement_public_key
-                     FROM merchants m
-                     INNER JOIN invoices i ON i.merchant_id = m.id
-                     WHERE i.id = $1",
-                    &[&invoice.id],
-                )
-                .await?;
-            let settlement_key = settlement_row
-                .map(|r| r.get::<_, String>(0))
-                .unwrap_or_default();
-            let (payout_queued, payout_skip_reason) =
-                if !is_valid_account_public_key(&settlement_key) {
-                    transaction
-                        .execute(
-                            "INSERT INTO payment_events (invoice_id, event_type, payload) VALUES ($1, $2, $3)",
-                            &[
-                                &invoice.id,
-                                &"payout_skipped_invalid_destination",
-                                &json!({ "reason": "invalid_settlement_public_key" }),
-                            ],
-                        )
-                        .await?;
-                    (false, Some("invalid_settlement_public_key"))
-                } else {
-                    let inserted = transaction
-                        .execute(
-                            "INSERT INTO payouts (invoice_id, merchant_id, destination_public_key, amount_cents, asset_code, asset_issuer)
-                             SELECT id, merchant_id, (SELECT settlement_public_key FROM merchants WHERE merchants.id = invoices.merchant_id),
-                                    net_amount_cents, asset_code, asset_issuer
-                             FROM invoices WHERE id = $1
-                             ON CONFLICT (invoice_id) DO NOTHING",
-                            &[&invoice.id],
-                        )
-                        .await?;
-                    if inserted > 0 { (true, None) } else { (false, Some("payout_already_queued")) }
-                };
+            let outcome = mark_invoice_paid_and_queue_payout(
+                &transaction,
+                invoice.id,
+                &payment.hash,
+                &payment.payment,
+            )
+            .await?;
             transaction.commit().await?;
-            Ok(Json(json!({
-                "dryRun": false,
-                "publicId": invoice.public_id,
-                "action": "paid",
-                "txHash": payment.hash,
-                "memo": payment.memo,
-                "payoutQueued": payout_queued,
-                "payoutSkipReason": payout_skip_reason
-            })))
+            match outcome {
+                InvoicePaidOutcome::Applied {
+                    payout_queued,
+                    payout_skip_reason,
+                } => Ok(Json(json!({
+                    "dryRun": false,
+                    "publicId": invoice.public_id,
+                    "action": "paid",
+                    "txHash": payment.hash,
+                    "memo": payment.memo,
+                    "payoutQueued": payout_queued,
+                    "payoutSkipReason": payout_skip_reason.map(|reason| reason.as_str())
+                }))),
+                InvoicePaidOutcome::AlreadyTransitioned => Ok(Json(json!({
+                    "dryRun": false,
+                    "publicId": invoice.public_id,
+                    "action": "skipped",
+                    "reason": INVOICE_ALREADY_TRANSITIONED_REASON
+                }))),
+            }
         }
     }
 }
