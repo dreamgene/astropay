@@ -167,7 +167,10 @@ mod tests {
         build_checkout_url, invoice_amount_to_asset, invoice_is_expired,
         is_valid_account_public_key, payment_matches_invoice,
     };
-    use crate::{config::Config, models::Invoice};
+    use crate::{
+        config::{Config, LogFormat},
+        models::Invoice,
+    };
 
     fn sample_invoice() -> Invoice {
         Invoice {
@@ -221,6 +224,7 @@ mod tests {
             login_rate_ip_max: 80,
             login_rate_email_window_secs: 900,
             login_rate_email_fail_max: 12,
+            log_format: LogFormat::Human,
         }
     }
 

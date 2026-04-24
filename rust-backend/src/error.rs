@@ -63,12 +63,9 @@ struct UnauthorizedBody {
 pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
-    #[error("{0}")]
-    Unauthorized(String),
     #[error("Too many login attempts")]
-    RateLimited {
-        retry_after_seconds: u64,
-    },
+    RateLimited { retry_after_seconds: u64 },
+    #[error("{0}")]
     Unauthorized(UnauthorizedError),
     #[error("{0}")]
     NotFound(String),
@@ -101,12 +98,6 @@ struct RateLimitedInner {
 impl AppError {
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::BadRequest(message.into())
-    }
-
-    /// Prefer [`Self::unauthorized_code`] unless you need a custom `message` for the same `code`.
-    #[allow(dead_code)]
-    pub fn unauthorized(err: UnauthorizedError) -> Self {
-        Self::Unauthorized(err)
     }
 
     pub fn unauthorized_code(code: AuthErrorCode) -> Self {
@@ -152,14 +143,6 @@ impl IntoResponse for AppError {
                 }
                 res
             }
-            Self::BadRequest(message) => (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody { error: message }),
-            )
-                .into_response(),
-            Self::Unauthorized(message) => (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody { error: message }),
             Self::Unauthorized(err) => (
                 StatusCode::UNAUTHORIZED,
                 Json(UnauthorizedBody { error: err }),
@@ -172,25 +155,21 @@ impl IntoResponse for AppError {
                 .into_response(),
             Self::NotFound(message) => (
                 StatusCode::NOT_FOUND,
-                Json(ErrorBody { error: message }),
                 Json(LegacyErrorBody { error: message }),
             )
                 .into_response(),
             Self::Conflict(message) => (
                 StatusCode::CONFLICT,
-                Json(ErrorBody { error: message }),
                 Json(LegacyErrorBody { error: message }),
             )
                 .into_response(),
             Self::NotImplemented(message) => (
                 StatusCode::NOT_IMPLEMENTED,
-                Json(ErrorBody { error: message }),
                 Json(LegacyErrorBody { error: message }),
             )
                 .into_response(),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody {
                 Json(LegacyErrorBody {
                     error: "Unexpected error".to_string(),
                 }),
@@ -220,7 +199,7 @@ impl From<jsonwebtoken::errors::Error> for AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthErrorCode, UnauthorizedError};
+    use super::{AuthErrorCode, RateLimitedBody, RateLimitedInner, UnauthorizedError};
 
     #[test]
     fn unauthorized_body_serializes_nested_error_with_code() {
@@ -245,11 +224,6 @@ mod tests {
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "AUTH_CRON_SECRET_MISMATCH");
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RateLimitedBody, RateLimitedInner};
 
     #[test]
     fn rate_limited_json_uses_auth_rate_limited_code() {

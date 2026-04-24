@@ -2,11 +2,8 @@ use axum::{Json, extract::State, http::HeaderMap};
 use serde_json::{Value, json};
 
 use crate::{
-    AppState,
-    auth::authorize_cron_request,
-    error::AppError,
-    models::StellarWebhookRequest,
-    AppState, error::AppError, models::StellarWebhookRequest, stellar::is_valid_account_public_key,
+    AppState, auth::authorize_cron_request, error::AppError, models::StellarWebhookRequest,
+    stellar::is_valid_account_public_key,
 };
 
 pub async fn health() -> Json<Value> {
@@ -109,4 +106,3 @@ pub async fn stellar_webhook(
         "payoutSkipReason": payout_skip_reason
     })))
 }
-

@@ -2,6 +2,28 @@ use std::{env, net::SocketAddr};
 
 use chrono::Duration;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogFormat {
+    Human,
+    Json,
+}
+
+impl LogFormat {
+    pub fn from_env(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "json" => Self::Json,
+            _ => Self::Human,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Json => "json",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: SocketAddr,
@@ -28,6 +50,7 @@ pub struct Config {
     /// Sliding window (seconds) for failed logins per normalized email. `LOGIN_RATE_EMAIL_FAIL_MAX=0` disables.
     pub login_rate_email_window_secs: u64,
     pub login_rate_email_fail_max: u32,
+    pub log_format: LogFormat,
 }
 
 impl Config {
@@ -80,6 +103,9 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(12),
+            log_format: LogFormat::from_env(
+                &env::var("LOG_FORMAT").unwrap_or_else(|_| "human".to_string()),
+            ),
         })
     }
 
@@ -90,7 +116,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, LogFormat};
 
     fn sample_config() -> Config {
         Config {
@@ -115,6 +141,7 @@ mod tests {
             login_rate_ip_max: 80,
             login_rate_email_window_secs: 900,
             login_rate_email_fail_max: 12,
+            log_format: LogFormat::Human,
         }
     }
 
@@ -139,5 +166,12 @@ mod tests {
         assert_eq!(config.pgssl, "disable");
         assert!(!config.secure_cookies);
         assert!(config.platform_treasury_secret_key.is_none());
+    }
+
+    #[test]
+    fn log_format_parser_is_case_insensitive() {
+        assert_eq!(LogFormat::from_env("json"), LogFormat::Json);
+        assert_eq!(LogFormat::from_env("JSON"), LogFormat::Json);
+        assert_eq!(LogFormat::from_env("pretty"), LogFormat::Human);
     }
 }

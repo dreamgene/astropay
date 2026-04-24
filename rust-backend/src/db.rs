@@ -45,6 +45,9 @@ mod tests {
         assert!(sql.contains("job_type"));
         assert!(sql.contains("metadata JSONB"));
         assert!(sql.contains("cron_runs_job_type_started_at_idx"));
+    }
+
+    #[test]
     fn invoice_metadata_plan_migration_documents_index_policy() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../usdc-payment-link-tool/migrations/003_invoice_metadata_jsonb_index_plan.sql");
@@ -72,6 +75,9 @@ mod tests {
                 "003 must not create speculative metadata indexes: {t}"
             );
         }
+    }
+
+    #[test]
     fn session_expiry_migration_defines_expected_indexes() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../usdc-payment-link-tool/migrations/002_session_expiry_indexes.sql");

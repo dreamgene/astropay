@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod logging;
 mod login_rate_limit;
 mod models;
 mod settle;
@@ -16,8 +17,10 @@ use axum::{
     routing::{get, post},
 };
 use deadpool_postgres::Pool;
-use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tower_http::trace::{
+    DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
+};
+use tracing::Level;
 
 use crate::{config::Config, db::create_pool, login_rate_limit::LoginRateLimiter};
 
@@ -31,14 +34,9 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     load_env_files();
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let config = Config::from_env()?;
+    logging::init_tracing(config.log_format);
+
     let pool = create_pool(&config)?;
     let login_limiter = LoginRateLimiter::from_config(&config);
     let state = AppState {
@@ -72,10 +70,20 @@ async fn main() -> anyhow::Result<()> {
             "/api/webhooks/stellar",
             post(handlers::misc::stellar_webhook),
         )
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO))
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
         .with_state(state);
 
-    tracing::info!("rust backend listening on {}", config.bind_addr);
+    tracing::info!(
+        bind_addr = %config.bind_addr,
+        log_format = config.log_format.as_str(),
+        "rust backend listening"
+    );
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     axum::serve(
         listener,

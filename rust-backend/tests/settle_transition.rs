@@ -138,8 +138,7 @@ fn payout_and_invoice_reach_identical_terminal_status() {
     // Dashboard queries join payouts ↔ invoices on status. Both must be
     // 'settled' after the atomic write — never one without the other.
     assert_eq!(
-        SETTLE_MUTATIONS.payout_status,
-        SETTLE_MUTATIONS.invoice_status,
+        SETTLE_MUTATIONS.payout_status, SETTLE_MUTATIONS.invoice_status,
         "payout and invoice must land on the same status string"
     );
 }
@@ -172,10 +171,7 @@ fn only_paid_invoice_status_allows_settlement() {
         if status == "paid" {
             assert!(result.is_ok(), "expected Ok for 'paid', got {result:?}");
         } else {
-            assert!(
-                result.is_err(),
-                "expected Err for '{status}', got Ok"
-            );
+            assert!(result.is_err(), "expected Err for '{status}', got Ok");
         }
     }
 }

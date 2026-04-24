@@ -16,22 +16,6 @@ use crate::{
     models::Merchant,
 };
 
-/// Validates `Authorization: Bearer <token>` for cron and webhook routes.
-pub fn authorize_cron_request(cron_secret: &str, headers: &HeaderMap) -> Result<(), AppError> {
-    if cron_secret.is_empty() {
-        return Err(AppError::unauthorized("Unauthorized".to_string()));
-    }
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    if token == Some(cron_secret) {
-        Ok(())
-    } else {
-        Err(AppError::unauthorized("Unauthorized".to_string()))
-    }
-}
-
 pub const SESSION_COOKIE: &str = "astropay_session";
 
 /// Same rule as registration SQL: neither incoming key may appear in any existing
@@ -41,9 +25,9 @@ pub fn wallet_keys_conflict_with_existing(
     stellar: &str,
     settlement: &str,
 ) -> bool {
-    existing.iter().any(|(es, et)| {
-        *es == stellar || *es == settlement || *et == stellar || *et == settlement
-    })
+    existing
+        .iter()
+        .any(|(es, et)| *es == stellar || *es == settlement || *et == stellar || *et == settlement)
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -115,10 +99,6 @@ pub fn clear_session_cookie(config: &Config) -> Cookie<'static> {
 }
 
 /// Resolves the merchant for a signed session cookie.
-///
-/// The nested `EXISTS` probes `sessions` by **`id` (JWT `sid`)** and `merchant_id` (`sub`). PostgreSQL uses the session **primary key**
-/// for that probe; `expires_at > NOW()` is evaluated on the single fetched row. Bulk expiry deletes are a separate workload and rely on
-/// btree indexes on `expires_at` (see migrations `002_session_expiry_indexes.sql`).
 pub async fn current_merchant<C>(
     client: &C,
     config: &Config,
@@ -160,7 +140,9 @@ where
 /// Validates `Authorization: Bearer <token>` against the configured cron/webhook secret.
 pub fn authorize_cron_request(cron_secret: &str, headers: &HeaderMap) -> Result<(), AppError> {
     if cron_secret.is_empty() {
-        return Err(AppError::unauthorized_code(AuthErrorCode::CronSecretMismatch));
+        return Err(AppError::unauthorized_code(
+            AuthErrorCode::CronSecretMismatch,
+        ));
     }
     let token = headers
         .get(header::AUTHORIZATION)
@@ -169,7 +151,9 @@ pub fn authorize_cron_request(cron_secret: &str, headers: &HeaderMap) -> Result<
     if token == Some(cron_secret) {
         Ok(())
     } else {
-        Err(AppError::unauthorized_code(AuthErrorCode::CronSecretMismatch))
+        Err(AppError::unauthorized_code(
+            AuthErrorCode::CronSecretMismatch,
+        ))
     }
 }
 
@@ -187,12 +171,10 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
 
     use super::{
-        generate_memo, generate_public_id, hash_password, session_cookie, verify_password,
-        wallet_keys_conflict_with_existing,
         authorize_cron_request, generate_memo, generate_public_id, hash_password, session_cookie,
-        verify_password,
+        verify_password, wallet_keys_conflict_with_existing,
     };
-    use crate::config::Config;
+    use crate::config::{Config, LogFormat};
 
     fn g_key(fill: char) -> String {
         format!("G{}", std::iter::repeat(fill).take(55).collect::<String>())
@@ -221,6 +203,7 @@ mod tests {
             login_rate_ip_max: 80,
             login_rate_email_window_secs: 900,
             login_rate_email_fail_max: 12,
+            log_format: LogFormat::Human,
         }
     }
 
@@ -264,7 +247,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer x"),
+            HeaderValue::from_static("Bearer anything"),
+        );
+        assert!(authorize_cron_request("", &headers).is_err());
+    }
+
+    #[test]
     fn wallet_conflict_detects_stellar_reuse() {
         let s1 = g_key('1');
         let t1 = g_key('2');
@@ -297,6 +285,9 @@ mod tests {
             t1.as_str(),
             s2.as_str(),
         ));
+    }
+
+    #[test]
     fn authorize_cron_rejects_wrong_bearer() {
         let mut headers = HeaderMap::new();
         headers.insert(
