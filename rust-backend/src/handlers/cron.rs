@@ -90,7 +90,33 @@ pub async fn reconcile(
 ) -> Result<Json<Value>, AppError> {
     authorize_cron_request(&state.config.cron_secret, &headers)?;
     let dry_run = params.dry_run;
+    let scan_limit = state.config.reconcile_scan_limit;
+    let scan_window_hours = state.config.reconcile_scan_window_hours;
     let mut client = state.pool.get().await?;
+
+    // Build the scan query. When scan_window_hours > 0 restrict to invoices
+    // created within that window so stale pending rows don't clog every run.
+    let rows = if scan_window_hours > 0 {
+        client
+            .query(
+                "SELECT * FROM invoices
+                 WHERE status = 'pending'
+                   AND created_at >= NOW() - ($2::bigint * INTERVAL '1 hour')
+                 ORDER BY created_at ASC
+                 LIMIT $1",
+                &[&scan_limit, &scan_window_hours],
+            )
+            .await?
+    } else {
+        client
+            .query(
+                "SELECT * FROM invoices WHERE status = 'pending' ORDER BY created_at ASC LIMIT $1",
+                &[&scan_limit],
+            )
+            .await?
+    };
+    let invoices = rows.iter().map(Invoice::from_row).collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(invoices.len());
     let mut results: Vec<Value> = Vec::new();
 
     // Keyset cursor: start before the earliest possible row.
@@ -422,6 +448,9 @@ pub async fn reconcile(
     let body = json!({
         "dryRun": dry_run,
         "scanned": results.len(),
+        "scanLimit": scan_limit,
+        "scanWindowHours": if scan_window_hours > 0 { json!(scan_window_hours) } else { json!(null) },
+        "results": results
         "results": results,
         "payoutsConfirmed": confirmed.len(),
         "payoutsChainFailed": chain_failed.len(),

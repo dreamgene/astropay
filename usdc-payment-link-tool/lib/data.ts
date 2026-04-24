@@ -177,6 +177,26 @@ export const markInvoiceExpired = async (invoiceId: string) => {
   await query(`UPDATE invoices SET status = 'expired', updated_at = NOW() WHERE id = $1 AND status = 'pending'`, [invoiceId]);
 };
 
+export const pendingInvoices = async ({
+  limit = env.reconcileScanLimit,
+  windowHours = env.reconcileScanWindowHours,
+}: { limit?: number; windowHours?: number } = {}) => {
+  if (windowHours > 0) {
+    const result = await query<Invoice>(
+      `SELECT * FROM invoices
+       WHERE status = 'pending'
+         AND created_at >= NOW() - ($2 * INTERVAL '1 hour')
+       ORDER BY created_at ASC
+       LIMIT $1`,
+      [limit, windowHours],
+    );
+    return result.rows;
+  }
+  const result = await query<Invoice>(
+    `SELECT * FROM invoices WHERE status = 'pending' ORDER BY created_at ASC LIMIT $1`,
+    [limit],
+  );
+  return result.rows;
 const RECONCILE_PAGE_SIZE = 100;
 const SETTLE_PAGE_SIZE = 100;
 
