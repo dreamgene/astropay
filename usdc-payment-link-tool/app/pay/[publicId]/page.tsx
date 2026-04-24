@@ -9,6 +9,27 @@ export default async function PayPage({ params }: { params: Promise<{ publicId: 
   const invoice = await getInvoiceByPublicId(publicId);
   if (!invoice) notFound();
 
+  // AP-010: show a purpose-built expired state instead of the generic checkout flow.
+  if (invoice.status === 'expired') {
+    return (
+      <div className="grid two">
+        <div className="card stack">
+          <div className="merchant-brand">
+            <span className="merchant-brand__name">{invoice.business_name}</span>
+            <span className="badge">via ASTROpay</span>
+          </div>
+          <div className="badge">Invoice expired</div>
+          <h1 style={{ margin: 0 }}>This invoice has expired</h1>
+          <p className="muted">
+            This payment link is no longer valid. Please contact{' '}
+            <strong>{invoice.business_name}</strong> to request a new invoice.
+          </p>
+          <p className="muted small">Invoice: {invoice.description}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="grid two">
       <div className="card stack">
@@ -42,3 +63,4 @@ export default async function PayPage({ params }: { params: Promise<{ publicId: 
     </div>
   );
 }
+
