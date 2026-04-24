@@ -11,6 +11,7 @@ function authorized(request: Request) {
 
 export async function GET(request: Request) {
   if (!authorized(request)) return fail('Unauthorized', 401);
+
   const dryRun = new URL(request.url).searchParams.get('dry_run') === 'true';
   const scanLimit = env.reconcileScanLimit;
   const scanWindowHours = env.reconcileScanWindowHours;
@@ -18,6 +19,7 @@ export async function GET(request: Request) {
   const results: Array<Record<string, unknown>> = [];
   let success = true;
   let errorDetail: string | null = null;
+
   try {
     const invoices = await pendingInvoices({ limit: scanLimit, windowHours: scanWindowHours });
     // pendingInvoices() uses keyset pagination internally and returns the full
@@ -31,6 +33,21 @@ export async function GET(request: Request) {
         results.push({ publicId: invoice.public_id, action: 'expired' });
         continue;
       }
+
+      const payment = await findPaymentForInvoice(invoice);
+      if (payment) {
+        const payout = await markInvoicePaid({
+          invoiceId: invoice.id,
+          transactionHash: payment.hash,
+          payload: payment.payment,
+        });
+        results.push({
+          publicId: invoice.public_id,
+          action: 'paid',
+          txHash: payment.hash,
+          payoutQueued: payout.payoutQueued,
+          payoutSkipReason: payout.payoutSkipReason,
+        });
       const result = await findPaymentForInvoice(invoice);
       if (result && 'assetMismatch' in result) {
         if (!dryRun) await recordAssetMismatch(invoice.id, result.assetMismatch);
