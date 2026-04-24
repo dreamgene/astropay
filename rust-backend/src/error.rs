@@ -73,6 +73,10 @@ pub enum AppError {
     Conflict(String),
     #[error("{0}")]
     NotImplemented(String),
+    /// Horizon is temporarily unavailable. Invoice state must NOT be mutated
+    /// when this error is returned (issue #167).
+    #[error("Horizon is temporarily unavailable")]
+    HorizonUnavailable,
     #[error("Internal server error")]
     Internal,
 }
@@ -173,11 +177,19 @@ impl IntoResponse for AppError {
                 Json(LegacyErrorBody { error: message }),
             )
                 .into_response(),
+            Self::HorizonUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(LegacyErrorBody {
+                    error: "Horizon is temporarily unavailable; please retry later".to_string(),
+                }),
+            )
+                .into_response(),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(LegacyErrorBody {
                     error: "Unexpected error".to_string(),
                 }),
+                Json(LegacyErrorBody { error: "Unexpected error".to_string() }),
             )
                 .into_response(),
         }

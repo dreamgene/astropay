@@ -1,7 +1,7 @@
 import { fail, ok } from '@/lib/http';
 import { env } from '@/lib/env';
 import { findPaymentForInvoice } from '@/lib/stellar';
-import { markInvoiceExpired, markInvoicePaid, pendingInvoices, recordCronRun } from '@/lib/data';
+import { markInvoiceExpired, markInvoicePaid, pendingInvoices, recordAssetMismatch, recordCronRun } from '@/lib/data';
 
 function authorized(request: Request) {
   const auth = request.headers.get('authorization');
@@ -12,11 +12,16 @@ function authorized(request: Request) {
 export async function GET(request: Request) {
   if (!authorized(request)) return fail('Unauthorized', 401);
   const dryRun = new URL(request.url).searchParams.get('dry_run') === 'true';
+  const scanLimit = env.reconcileScanLimit;
+  const scanWindowHours = env.reconcileScanWindowHours;
   let scanned = 0;
   const results: Array<Record<string, unknown>> = [];
   let success = true;
   let errorDetail: string | null = null;
   try {
+    const invoices = await pendingInvoices({ limit: scanLimit, windowHours: scanWindowHours });
+    // pendingInvoices() uses keyset pagination internally and returns the full
+    // backlog regardless of size — no arbitrary cap.
     const invoices = await pendingInvoices();
     scanned = invoices.length;
 
@@ -26,7 +31,13 @@ export async function GET(request: Request) {
         results.push({ publicId: invoice.public_id, action: 'expired' });
         continue;
       }
-      const payment = await findPaymentForInvoice(invoice);
+      const result = await findPaymentForInvoice(invoice);
+      if (result && 'assetMismatch' in result) {
+        if (!dryRun) await recordAssetMismatch(invoice.id, result.assetMismatch);
+        results.push({ publicId: invoice.public_id, action: 'asset_mismatch', ...result.assetMismatch });
+        continue;
+      }
+      const payment = result;
       if (payment) {
         if (dryRun) {
           results.push({ publicId: invoice.public_id, action: 'paid', txHash: payment.hash });
@@ -49,7 +60,13 @@ export async function GET(request: Request) {
       }
     }
 
-    return ok({ dryRun, scanned, results });
+    return ok({
+      dryRun,
+      scanned,
+      scanLimit,
+      scanWindowHours: scanWindowHours > 0 ? scanWindowHours : null,
+      results,
+    });
   } catch (error) {
     success = false;
     errorDetail = error instanceof Error ? error.message : 'reconcile failed';
@@ -59,7 +76,7 @@ export async function GET(request: Request) {
       await recordCronRun({
         jobType: 'reconcile',
         success,
-        metadata: { scanned, results },
+        metadata: { scanned, scanLimit, scanWindowHours: scanWindowHours > 0 ? scanWindowHours : null, results },
         errorDetail,
       });
     }
