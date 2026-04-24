@@ -1,9 +1,37 @@
 use chrono::{DateTime, Utc};
-use reqwest::Client;
+use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use stellar_strkey::ed25519::PublicKey as Ed25519PublicKey;
+use tokio::time::{Duration, sleep};
+use tracing::warn;
 
 use crate::{config::Config, error::AppError, models::Invoice};
+
+const BACKOFF_BASE_MS: u64 = 500;
+const MAX_RETRIES: u32 = 4;
+
+/// GET `url` with exponential backoff on HTTP 429. Logs each throttle event.
+async fn horizon_get(client: &Client, url: &str) -> Result<Response, AppError> {
+    let mut delay_ms = BACKOFF_BASE_MS;
+    for attempt in 0..=MAX_RETRIES {
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| AppError::Internal)?;
+        if resp.status() != StatusCode::TOO_MANY_REQUESTS {
+            return resp.error_for_status().map_err(|_| AppError::Internal);
+        }
+        if attempt == MAX_RETRIES {
+            warn!(url, "horizon rate-limited after {} retries, giving up", MAX_RETRIES);
+            return Err(AppError::Internal);
+        }
+        warn!(url, attempt, delay_ms, "horizon 429 — backing off");
+        sleep(Duration::from_millis(delay_ms)).await;
+        delay_ms *= 2;
+    }
+    Err(AppError::Internal)
+}
 
 /// Returns true when `value` is a well-formed Stellar Ed25519 account strkey (checksum-valid `G...`).
 pub fn is_valid_account_public_key(value: &str) -> bool {
@@ -95,13 +123,8 @@ pub async fn find_payment_for_invoice(
         invoice.destination_public_key
     );
     let client = Client::new();
-    let page = client
-        .get(payments_url)
-        .send()
-        .await
-        .map_err(|_| AppError::Internal)?
-        .error_for_status()
-        .map_err(|_| AppError::Internal)?
+    let page = horizon_get(&client, &payments_url)
+        .await?
         .json::<PaymentsPage>()
         .await
         .map_err(|_| AppError::Internal)?;
@@ -130,13 +153,8 @@ pub async fn find_payment_for_invoice(
             config.horizon_url.trim_end_matches('/'),
             record.transaction_hash
         );
-        let tx = client
-            .get(tx_url)
-            .send()
-            .await
-            .map_err(|_| AppError::Internal)?
-            .error_for_status()
-            .map_err(|_| AppError::Internal)?
+        let tx = horizon_get(&client, &tx_url)
+            .await?
             .json::<HorizonTransaction>()
             .await
             .map_err(|_| AppError::Internal)?;
@@ -295,6 +313,19 @@ mod tests {
             "amount": "12.50"
         });
         assert!(payment_matches_invoice(&record, "astro_deadbeef", &invoice));
+    }
+
+    #[test]
+    fn backoff_delay_doubles_each_attempt() {
+        let mut delay = super::BACKOFF_BASE_MS;
+        let delays: Vec<u64> = (0..super::MAX_RETRIES)
+            .map(|_| {
+                let d = delay;
+                delay *= 2;
+                d
+            })
+            .collect();
+        assert_eq!(delays, vec![500, 1000, 2000, 4000]);
     }
 
     #[test]
