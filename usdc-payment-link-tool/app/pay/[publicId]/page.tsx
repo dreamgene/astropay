@@ -23,8 +23,14 @@ export default async function PayPage({ params }: { params: Promise<{ publicId: 
         )}
         <p className="muted small">Your payment goes to the ASTROpay treasury on Stellar and is settled to {invoice.business_name} after confirmation.</p>
         <p className="muted">Expires: {isoToLocal(invoice.expires_at)}</p>
-        <div className="copy-row"><span className="muted">Memo:</span><span className="mono muted">{invoice.memo}</span><CopyButton value={invoice.memo} /></div>
-        <div className="copy-row"><span className="muted">Destination:</span><span className="mono muted">{invoice.destination_public_key}</span><CopyButton value={invoice.destination_public_key} /></div>
+        {/* AP-003: collapsible metadata panel — hidden by default to keep checkout clean */}
+        <details>
+          <summary className="muted small" style={{ cursor: 'pointer' }}>Payment details</summary>
+          <div className="stack" style={{ marginTop: '0.5rem' }}>
+            <div className="copy-row"><span className="muted">Memo:</span><span className="mono muted">{invoice.memo}</span><CopyButton value={invoice.memo} /></div>
+            <div className="copy-row"><span className="muted">Destination:</span><span className="mono muted">{invoice.destination_public_key}</span><CopyButton value={invoice.destination_public_key} /></div>
+          </div>
+        </details>
       </div>
       <div className="stack">
         <div className="card stack">
