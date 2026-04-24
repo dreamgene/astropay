@@ -187,6 +187,17 @@ ORDER BY dl.created_at DESC;
 
 SQL lives in `../usdc-payment-link-tool/migrations/`. Apply with `cargo run --bin migrate` from `rust-backend/`. The runner errors clearly if the migrations directory is missing or if a file’s SQL fails.
 
+### Clean Postgres migration test
+
+`cargo test` includes a clean-database migration test that is skipped unless `ASTROPAY_MIGRATION_TEST_ADMIN_DATABASE_URL` is set. Point that variable at a disposable admin/maintenance Postgres database with `CREATE DATABASE` privilege. The test creates a temporary database, applies the full SQL migration chain from scratch, verifies `schema_migrations` and the core tables, reruns the chain to check idempotency, then drops the temporary database.
+
+Example:
+
+```bash
+cd rust-backend
+ASTROPAY_MIGRATION_TEST_ADMIN_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres cargo test migration_chain_applies_to_clean_postgres_database
+```
+
 **Invoice `metadata` (JSONB):** migration `003_invoice_metadata_jsonb_index_plan.sql` records the indexing policy—no speculative GIN until real filter queries exist—and sets `COMMENT ON COLUMN invoices.metadata` for DB catalog visibility. See the Next.js README for the same guidance.
 
 **Verification:** `cargo test` (includes a guard that 003 stays comment/plan-only without `CREATE INDEX`).

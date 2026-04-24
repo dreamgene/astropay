@@ -394,10 +394,17 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer x"),
+            HeaderValue::from_static("Bearer mysecret"),
         );
-        assert!(authorize_cron_request("", &headers).is_err());
+        assert!(authorize_cron_request("mysecret", &headers).is_ok());
     }
+
+    #[test]
+    fn authorize_cron_rejects_missing_header() {
+        assert!(authorize_cron_request("secret", &HeaderMap::new()).is_err());
+    }
+
+    // --- wallet key conflict ---
 
     #[test]
     fn authorize_cron_rejects_missing_header() {
