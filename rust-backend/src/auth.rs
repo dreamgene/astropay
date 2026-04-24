@@ -355,6 +355,16 @@ mod tests {
     // --- wallet key conflict ---
 
     #[test]
+    fn authorize_cron_rejects_empty_configured_secret() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer x"),
+        );
+        assert!(authorize_cron_request("", &headers).is_err());
+    }
+
+    #[test]
     fn wallet_conflict_detects_stellar_reuse() {
         let s1 = g_key('1');
         let t1 = g_key('2');
