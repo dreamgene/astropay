@@ -255,6 +255,7 @@ mod tests {
             reconcile_scan_limit: 100,
             reconcile_scan_window_hours: 24,
             archive_retention_days: 30,
+            reconcile_scan_window_hours: 0,
         }
     }
 
@@ -284,6 +285,7 @@ mod tests {
             reconcile_scan_limit: 100,
             reconcile_scan_window_hours: 24,
             archive_retention_days: 30,
+            reconcile_scan_window_hours: 0,
         }
     }
 
@@ -363,7 +365,6 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer mysecret"),
         );
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer mysecret"));
         assert!(authorize_cron_request("mysecret", &headers).is_ok());
     }
 
@@ -376,6 +377,7 @@ mod tests {
         );
         assert!(authorize_cron_request("cron_secret", &headers).is_err());
     }
+
     #[test]
     fn authorize_cron_rejects_when_secret_not_configured() {
         let mut headers = HeaderMap::new();
