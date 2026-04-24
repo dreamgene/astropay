@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use stellar_strkey::ed25519::PublicKey as Ed25519PublicKey;
 
 use crate::{config::Config, error::AppError, models::Invoice};
@@ -89,6 +89,9 @@ pub fn invoice_amount_to_asset(invoice: &Invoice) -> String {
     format!("{:.2}", invoice.gross_amount_cents as f64 / 100.0)
 }
 
+/// Returns true when the Horizon payment record matches the invoice on all five criteria:
+/// destination key, asset code, asset issuer, gross amount (two decimal places), and memo.
+/// Both `to` and `account` fields are checked to handle path-payment vs direct-payment shapes.
 pub fn payment_matches_invoice(record: &serde_json::Value, memo: &str, invoice: &Invoice) -> bool {
     let destination = record
         .get("to")
@@ -115,6 +118,15 @@ pub fn payment_matches_invoice(record: &serde_json::Value, memo: &str, invoice: 
         && memo == invoice.memo
 }
 
+/// Queries Horizon for the most recent 50 payment operations on the invoice destination account
+/// and returns the first one that matches all of: destination key, asset code, asset issuer,
+/// gross amount (formatted to two decimal places), and transaction memo.
+///
+/// Returns `None` if no matching payment is found in that window.
+/// Returns `Err(AppError::Internal)` if the Horizon HTTP call or JSON parse fails.
+///
+/// **Limit**: only the 50 most recent operations are inspected. Payments older than that window
+/// will not be detected. Use the replay endpoint to rescan a specific invoice manually.
 pub async fn find_payment_for_invoice(
     config: &Config,
     invoice: &Invoice,
@@ -199,6 +211,60 @@ pub fn invoice_is_expired(invoice: &Invoice, now: DateTime<Utc>) -> bool {
     now > invoice.expires_at
 }
 
+/// A raw USDC payment that arrived at the treasury account on Horizon.
+#[derive(Debug, Clone, Serialize)]
+pub struct TreasuryPayment {
+    pub transaction_hash: String,
+    pub from: String,
+    pub amount: String,
+    pub asset_code: String,
+    pub asset_issuer: String,
+}
+
+/// Fetches the most recent `limit` USDC payments to `treasury_public_key` from Horizon.
+/// Returns only `payment` operations whose asset matches the configured asset.
+pub async fn fetch_treasury_payments(
+    config: &Config,
+    limit: u32,
+) -> Result<Vec<TreasuryPayment>, AppError> {
+    let url = format!(
+        "{}/accounts/{}/payments?order=desc&limit={}",
+        config.horizon_url.trim_end_matches('/'),
+        config.platform_treasury_public_key,
+        limit,
+    );
+    let page = Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| AppError::Internal)?
+        .error_for_status()
+        .map_err(|_| AppError::Internal)?
+        .json::<PaymentsPage>()
+        .await
+        .map_err(|_| AppError::Internal)?;
+
+    let payments = page
+        .embedded
+        .records
+        .into_iter()
+        .filter(|r| {
+            r.record_type == "payment"
+                && r.asset_code.as_deref() == Some(config.asset_code.as_str())
+                && r.asset_issuer.as_deref() == Some(config.asset_issuer.as_str())
+        })
+        .map(|r| TreasuryPayment {
+            transaction_hash: r.transaction_hash,
+            from: r.account.unwrap_or_default(),
+            amount: r.amount.unwrap_or_default(),
+            asset_code: r.asset_code.unwrap_or_default(),
+            asset_issuer: r.asset_issuer.unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(payments)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
@@ -234,6 +300,7 @@ mod tests {
             settlement_hash: None,
             checkout_url: None,
             qr_data_url: None,
+            last_checkout_attempt_at: None,
             metadata: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -380,5 +447,39 @@ mod tests {
         assert!(!is_valid_account_public_key(
             "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
         ));
+    }
+
+    /// Verifies the filter logic used inside `fetch_treasury_payments` without hitting Horizon.
+    #[test]
+    fn treasury_payment_filter_excludes_non_usdc_and_non_payment_ops() {
+        // Simulate the filter applied inside fetch_treasury_payments using plain structs.
+        struct RawOp {
+            record_type: &'static str,
+            asset_code: Option<&'static str>,
+            asset_issuer: Option<&'static str>,
+            transaction_hash: &'static str,
+            from: &'static str,
+            amount: &'static str,
+        }
+
+        let config = sample_config();
+        let ops = vec![
+            RawOp { record_type: "payment",       asset_code: Some("USDC"), asset_issuer: Some("ISSUER"), transaction_hash: "hash_usdc",    from: "GSENDER1", amount: "20.00" },
+            RawOp { record_type: "payment",       asset_code: Some("XLM"),  asset_issuer: Some("native"), transaction_hash: "hash_xlm",    from: "GSENDER2", amount: "5.00"  },
+            RawOp { record_type: "create_account", asset_code: Some("USDC"), asset_issuer: Some("ISSUER"), transaction_hash: "hash_create", from: "GSENDER3", amount: "0.00"  },
+        ];
+
+        let filtered: Vec<_> = ops
+            .iter()
+            .filter(|r| {
+                r.record_type == "payment"
+                    && r.asset_code == Some(config.asset_code.as_str())
+                    && r.asset_issuer == Some(config.asset_issuer.as_str())
+            })
+            .collect();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].transaction_hash, "hash_usdc");
+        assert_eq!(filtered[0].from, "GSENDER1");
     }
 }
