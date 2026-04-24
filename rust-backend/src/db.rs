@@ -56,6 +56,26 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn payment_events_event_type_index_migration_is_idempotent() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../usdc-payment-link-tool/migrations/010_payment_events_event_type_index.sql");
+        let sql =
+            std::fs::read_to_string(path).expect("read 010_payment_events_event_type_index.sql");
+        assert!(
+            sql.contains("CREATE INDEX IF NOT EXISTS payment_events_event_type_idx"),
+            "must define the event_type index"
+        );
+        assert!(
+            sql.contains("ON payment_events (event_type)"),
+            "index must be on payment_events.event_type"
+        );
+        assert!(
+            sql.contains("CREATE INDEX IF NOT EXISTS"),
+            "must be idempotent"
+        );
+    }
+
+    #[test]
     fn dashboard_index_migration_defines_composite_index() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../usdc-payment-link-tool/migrations/006_invoice_dashboard_index.sql");
