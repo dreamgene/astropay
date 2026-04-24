@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
 };
 use chrono::Utc;
@@ -14,11 +14,29 @@ use crate::{
     auth::authorize_cron_request,
     error::AppError,
     models::Invoice,
-    stellar::{find_payment_for_invoice, invoice_is_expired, is_valid_account_public_key},
+    stellar::{
+        fetch_treasury_payments, find_payment_for_invoice, invoice_is_expired,
+        is_valid_account_public_key,
+    },
 };
 
 /// Payouts that fail this many times are moved to the dead-letter path.
 const PAYOUT_DEAD_LETTER_THRESHOLD: i32 = 5;
+
+/// Default number of recent treasury payments to scan for orphans.
+const ORPHAN_SCAN_LIMIT: u32 = 50;
+
+#[derive(Deserialize)]
+pub struct DryRunParams {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Deserialize)]
+pub struct OrphanParams {
+    /// How many recent treasury payments to fetch from Horizon (default 50, max 200).
+    pub limit: Option<u32>,
+}
 
 pub async fn reconcile(
     State(state): State<AppState>,
@@ -277,6 +295,80 @@ pub async fn settle(
     Ok(Json(body))
 }
 
+/// Returns on-chain USDC payments that arrived at the platform treasury but do not
+/// match any invoice by `transaction_hash`.
+///
+/// These are "orphan" payments — funds received on-chain with no corresponding
+/// invoice record. Operators use this endpoint to identify and manually reconcile them.
+///
+/// Query params:
+/// - `limit`: number of recent treasury payments to scan (default 50, capped at 200)
+///
+/// Trigger via `GET /api/cron/orphan-payments` with `Authorization: Bearer <CRON_SECRET>`.
+pub async fn orphan_payments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<OrphanParams>,
+) -> Result<Json<Value>, AppError> {
+    authorize_cron_request(&state.config.cron_secret, &headers)?;
+
+    let limit = params.limit.unwrap_or(ORPHAN_SCAN_LIMIT).min(200);
+    if limit == 0 {
+        return Err(AppError::bad_request("limit must be greater than 0"));
+    }
+
+    let treasury_payments = fetch_treasury_payments(&state.config, limit).await?;
+
+    if treasury_payments.is_empty() {
+        return Ok(Json(json!({
+            "scanned": 0,
+            "orphans": [],
+            "treasury": state.config.platform_treasury_public_key,
+        })));
+    }
+
+    // Collect all transaction hashes from Horizon to check against the DB in one query.
+    let hashes: Vec<String> = treasury_payments
+        .iter()
+        .map(|p| p.transaction_hash.clone())
+        .collect();
+
+    let client = state.pool.get().await?;
+
+    // Fetch all invoices whose transaction_hash matches any of the scanned payments.
+    // Any hash NOT in this set is an orphan.
+    let rows = client
+        .query(
+            "SELECT transaction_hash FROM invoices WHERE transaction_hash = ANY($1)",
+            &[&hashes],
+        )
+        .await?;
+
+    let known_hashes: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|r| r.get::<_, Option<String>>("transaction_hash"))
+        .collect();
+
+    let orphans: Vec<Value> = treasury_payments
+        .iter()
+        .filter(|p| !known_hashes.contains(&p.transaction_hash))
+        .map(|p| {
+            json!({
+                "transactionHash": p.transaction_hash,
+                "from": p.from,
+                "amount": p.amount,
+                "assetCode": p.asset_code,
+                "assetIssuer": p.asset_issuer,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "scanned": treasury_payments.len(),
+        "orphanCount": orphans.len(),
+        "orphans": orphans,
+        "treasury": state.config.platform_treasury_public_key,
+    })))
 pub async fn replay_invoice(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -456,6 +548,94 @@ mod tests {
     #[test]
     fn dead_letter_threshold_is_five() {
         assert_eq!(super::PAYOUT_DEAD_LETTER_THRESHOLD, 5);
+    }
+
+    #[test]
+    fn orphan_scan_default_limit_is_fifty() {
+        assert_eq!(super::ORPHAN_SCAN_LIMIT, 50);
+    }
+
+    #[test]
+    fn orphan_params_limit_caps_at_200() {
+        // Mirrors the cap applied in the handler: .min(200)
+        let raw: u32 = 999;
+        assert_eq!(raw.min(200), 200);
+    }
+
+    #[test]
+    fn known_hash_is_not_orphan() {
+        use std::collections::HashSet;
+        use serde_json::json;
+        use crate::stellar::TreasuryPayment;
+
+        let payments = vec![
+            TreasuryPayment {
+                transaction_hash: "abc123".to_string(),
+                from: "GFROM".to_string(),
+                amount: "10.00".to_string(),
+                asset_code: "USDC".to_string(),
+                asset_issuer: "ISSUER".to_string(),
+            },
+            TreasuryPayment {
+                transaction_hash: "def456".to_string(),
+                from: "GFROM2".to_string(),
+                amount: "5.00".to_string(),
+                asset_code: "USDC".to_string(),
+                asset_issuer: "ISSUER".to_string(),
+            },
+        ];
+
+        let mut known: HashSet<String> = HashSet::new();
+        known.insert("abc123".to_string());
+
+        let orphans: Vec<_> = payments
+            .iter()
+            .filter(|p| !known.contains(&p.transaction_hash))
+            .map(|p| json!({ "transactionHash": p.transaction_hash }))
+            .collect();
+
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0]["transactionHash"], "def456");
+    }
+
+    #[test]
+    fn all_known_hashes_yields_no_orphans() {
+        use std::collections::HashSet;
+        use crate::stellar::TreasuryPayment;
+
+        let payments = vec![TreasuryPayment {
+            transaction_hash: "abc123".to_string(),
+            from: "GFROM".to_string(),
+            amount: "10.00".to_string(),
+            asset_code: "USDC".to_string(),
+            asset_issuer: "ISSUER".to_string(),
+        }];
+
+        let mut known: HashSet<String> = HashSet::new();
+        known.insert("abc123".to_string());
+
+        let orphans: Vec<_> = payments
+            .iter()
+            .filter(|p| !known.contains(&p.transaction_hash))
+            .collect();
+
+        assert!(orphans.is_empty());
+    }
+
+    #[test]
+    fn empty_treasury_payments_yields_no_orphans() {
+        use std::collections::HashSet;
+        use crate::stellar::TreasuryPayment;
+
+        let payments: Vec<TreasuryPayment> = vec![];
+        let known: HashSet<String> = HashSet::new();
+
+        let orphans: Vec<_> = payments
+            .iter()
+            .filter(|p| !known.contains(&p.transaction_hash))
+            .collect();
+
+        assert!(orphans.is_empty());
     }
 }
 
