@@ -164,10 +164,33 @@ export const pendingInvoices = async () => {
 };
 
 export const queuedPayouts = async () => {
+  // Apply exponential backoff for failed payouts: only return a failed payout
+  // once its backoff window has elapsed since last_failure_at.
+  //
+  // Backoff schedule (matches Rust settle.rs):
+  //   failure_count = 1 → 5 min
+  //   failure_count = 2 → 15 min
+  //   failure_count = 3 → 1 hour
+  //   failure_count = 4 → 4 hours
+  //   failure_count ≥ 5 → dead-lettered (excluded here)
   const result = await query<any>(
     `SELECT payouts.*, invoices.public_id, invoices.net_amount_cents, invoices.asset_code, invoices.asset_issuer, invoices.id as invoice_id_ref
      FROM payouts JOIN invoices ON invoices.id = payouts.invoice_id
-     WHERE payouts.status IN ('queued','failed') ORDER BY payouts.created_at ASC LIMIT 50`,
+     WHERE payouts.status = 'queued'
+        OR (
+          payouts.status = 'failed'
+          AND payouts.last_failure_at IS NOT NULL
+          AND payouts.last_failure_at + (
+            CASE payouts.failure_count
+              WHEN 1 THEN INTERVAL '5 minutes'
+              WHEN 2 THEN INTERVAL '15 minutes'
+              WHEN 3 THEN INTERVAL '1 hour'
+              WHEN 4 THEN INTERVAL '4 hours'
+              ELSE NULL
+            END
+          ) <= NOW()
+        )
+     ORDER BY payouts.created_at ASC LIMIT 50`,
   );
   return result.rows;
 };

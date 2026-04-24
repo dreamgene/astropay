@@ -14,6 +14,7 @@ use crate::{
     auth::authorize_cron_request,
     error::AppError,
     models::Invoice,
+    settle::{backoff_seconds, is_backoff_elapsed},
     stellar::{find_payment_for_invoice, invoice_is_expired, is_valid_account_public_key},
 };
 
@@ -197,6 +198,9 @@ pub async fn settle(
 
     let mut dead_lettered: Vec<Value> = Vec::new();
     let mut requeued: Vec<Value> = Vec::new();
+    let mut skipped_backoff: Vec<Value> = Vec::new();
+
+    let now_secs = Utc::now().timestamp();
 
     for row in &rows {
         let payout_id: uuid::Uuid = row.get("id");
@@ -204,6 +208,7 @@ pub async fn settle(
         let merchant_id: uuid::Uuid = row.get("merchant_id");
         let failure_count: i32 = row.get("failure_count");
         let failure_reason: Option<String> = row.get("failure_reason");
+        let last_failure_at: Option<chrono::DateTime<Utc>> = row.get("last_failure_at");
         let new_count = failure_count + 1;
 
         let tx = client.transaction().await?;
@@ -242,7 +247,24 @@ pub async fn settle(
             tx.commit().await?;
             dead_lettered.push(json!({ "payoutId": payout_id, "failureCount": new_count }));
         } else {
-            // Increment failure count and requeue for the next settle run.
+            // Apply backoff: only requeue if enough time has elapsed since the last failure.
+            let last_failure_secs = last_failure_at
+                .map(|t| t.timestamp())
+                .unwrap_or(0);
+
+            if !is_backoff_elapsed(new_count, last_failure_secs, now_secs) {
+                let backoff_secs = backoff_seconds(new_count).unwrap_or(0);
+                let retry_after = last_failure_secs + backoff_secs - now_secs;
+                tx.rollback().await?;
+                skipped_backoff.push(json!({
+                    "payoutId": payout_id,
+                    "failureCount": failure_count,
+                    "retryAfterSecs": retry_after,
+                }));
+                continue;
+            }
+
+            // Backoff window has elapsed — increment failure count and requeue.
             tx.execute(
                 "UPDATE payouts
                  SET status = 'queued', failure_count = $2, last_failure_at = NOW(), updated_at = NOW()
@@ -258,8 +280,10 @@ pub async fn settle(
     let body = json!({
         "deadLettered": dead_lettered.len(),
         "requeued": requeued.len(),
+        "skippedBackoff": skipped_backoff.len(),
         "deadLetteredItems": dead_lettered,
         "requeuedItems": requeued,
+        "skippedBackoffItems": skipped_backoff,
         "note": "Stellar transaction signing/submission is not implemented yet. This run only manages dead-letter escalation."
     });
 

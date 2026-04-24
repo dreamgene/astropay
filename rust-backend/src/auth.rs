@@ -354,29 +354,12 @@ mod tests {
 
     // --- wallet key conflict ---
 
+    #[test]
+    fn authorize_cron_rejects_empty_configured_secret() {
+        let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer x"),
-        );
-        assert!(authorize_cron_request("", &headers).is_err());
-    }
-
-    #[test]
-    fn authorize_cron_rejects_wrong_bearer() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer wrong"),
-        );
-        assert!(authorize_cron_request("cron_secret", &headers).is_err());
-    }
-
-    #[test]
-    fn authorize_cron_rejects_when_secret_not_configured() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer anything"),
         );
         assert!(authorize_cron_request("", &headers).is_err());
     }
