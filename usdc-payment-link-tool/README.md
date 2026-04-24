@@ -211,7 +211,7 @@ Because of that last point, Railway or another worker-friendly host is usually b
 - Cron and webhook endpoints require `Authorization: Bearer <CRON_SECRET>`.
 - The client never gets to declare an invoice paid.
 - Merchant registration rejects malformed Stellar keys; payout destinations are validated again when payouts are queued so bad data cannot create settlement jobs.
-- Production treasury secrets must remain server-only.
+- Production treasury secrets must remain server-only. See [`docs/treasury-key-custody.md`](../docs/treasury-key-custody.md) for storage, rotation, and verification requirements.
 
 ## Operational caveats
 
