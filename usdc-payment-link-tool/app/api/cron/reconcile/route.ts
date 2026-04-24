@@ -12,12 +12,14 @@ function authorized(request: Request) {
 export async function GET(request: Request) {
   if (!authorized(request)) return fail('Unauthorized', 401);
   const dryRun = new URL(request.url).searchParams.get('dry_run') === 'true';
+  const scanLimit = env.reconcileScanLimit;
+  const scanWindowHours = env.reconcileScanWindowHours;
   let scanned = 0;
   const results: Array<Record<string, unknown>> = [];
   let success = true;
   let errorDetail: string | null = null;
   try {
-    const invoices = await pendingInvoices();
+    const invoices = await pendingInvoices({ limit: scanLimit, windowHours: scanWindowHours });
     scanned = invoices.length;
 
     for (const invoice of invoices) {
@@ -49,7 +51,13 @@ export async function GET(request: Request) {
       }
     }
 
-    return ok({ dryRun, scanned, results });
+    return ok({
+      dryRun,
+      scanned,
+      scanLimit,
+      scanWindowHours: scanWindowHours > 0 ? scanWindowHours : null,
+      results,
+    });
   } catch (error) {
     success = false;
     errorDetail = error instanceof Error ? error.message : 'reconcile failed';
@@ -59,7 +67,7 @@ export async function GET(request: Request) {
       await recordCronRun({
         jobType: 'reconcile',
         success,
-        metadata: { scanned, results },
+        metadata: { scanned, scanLimit, scanWindowHours: scanWindowHours > 0 ? scanWindowHours : null, results },
         errorDetail,
       });
     }
