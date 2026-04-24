@@ -1,6 +1,9 @@
 use std::net::SocketAddr;
 
-use axum::{Json, extract::{ConnectInfo, State}};
+use axum::{
+    Json,
+    extract::{ConnectInfo, State},
+};
 use axum_extra::extract::{CookieJar as ExtractedCookieJar, cookie::CookieJar};
 use serde_json::json;
 
@@ -85,10 +88,7 @@ pub async fn login(
         return Err(AppError::bad_request("Invalid payload"));
     }
 
-    state
-        .login_limiter
-        .check_ip(&addr.ip().to_string())
-        .await?;
+    state.login_limiter.check_ip(&addr.ip().to_string()).await?;
 
     let client = state.pool.get().await?;
     let row = client
@@ -101,13 +101,17 @@ pub async fn login(
         .await?;
     let Some(row) = row else {
         state.login_limiter.record_email_failure(&email_key).await?;
-        return Err(AppError::unauthorized_code(AuthErrorCode::InvalidCredentials));
+        return Err(AppError::unauthorized_code(
+            AuthErrorCode::InvalidCredentials,
+        ));
     };
     let merchant = crate::models::Merchant::from_row(&row);
     let password_hash: String = row.get("password_hash");
     if !verify_password(&payload.password, &password_hash) {
         state.login_limiter.record_email_failure(&email_key).await?;
-        return Err(AppError::unauthorized_code(AuthErrorCode::InvalidCredentials));
+        return Err(AppError::unauthorized_code(
+            AuthErrorCode::InvalidCredentials,
+        ));
     }
     let cookie = create_session(&client, &state.config, merchant.id).await?;
     state.login_limiter.clear_email_failures(&email_key).await;

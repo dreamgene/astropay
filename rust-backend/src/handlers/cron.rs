@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
 };
 use chrono::Utc;
@@ -19,6 +19,20 @@ use crate::{
 
 /// Payouts that fail this many times are moved to the dead-letter path.
 const PAYOUT_DEAD_LETTER_THRESHOLD: i32 = 5;
+
+#[derive(Debug, Deserialize)]
+pub struct DryRunParams {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplayRequest {
+    #[serde(rename = "publicId")]
+    public_id: String,
+    #[serde(default)]
+    dry_run: bool,
+}
 
 pub async fn reconcile(
     State(state): State<AppState>,
@@ -79,9 +93,10 @@ pub async fn reconcile(
                     .await?;
                 let settlement_key: Option<String> = settlement_row.map(|row| row.get(0));
                 let settlement_key = settlement_key.unwrap_or_default();
-                let (payout_queued, payout_skip_reason) =
-                    if !is_valid_account_public_key(&settlement_key) {
-                        transaction
+                let (payout_queued, payout_skip_reason) = if !is_valid_account_public_key(
+                    &settlement_key,
+                ) {
+                    transaction
                             .execute(
                                 "INSERT INTO payment_events (invoice_id, event_type, payload) VALUES ($1, $2, $3)",
                                 &[
@@ -91,9 +106,9 @@ pub async fn reconcile(
                                 ],
                             )
                             .await?;
-                        (false, Some("invalid_settlement_public_key"))
-                    } else {
-                        let inserted = transaction
+                    (false, Some("invalid_settlement_public_key"))
+                } else {
+                    let inserted = transaction
                             .execute(
                                 "INSERT INTO payouts (invoice_id, merchant_id, destination_public_key, amount_cents, asset_code, asset_issuer)
                                  SELECT id, merchant_id, (SELECT settlement_public_key FROM merchants WHERE merchants.id = invoices.merchant_id),
@@ -103,12 +118,12 @@ pub async fn reconcile(
                                 &[&invoice.id],
                             )
                             .await?;
-                        if inserted > 0 {
-                            (true, None)
-                        } else {
-                            (false, Some("payout_already_queued"))
-                        }
-                    };
+                    if inserted > 0 {
+                        (true, None)
+                    } else {
+                        (false, Some("payout_already_queued"))
+                    }
+                };
                 transaction.commit().await?;
                 results.push(json!({
                     "publicId": invoice.public_id,
@@ -182,7 +197,7 @@ pub async fn purge_sessions(
 pub async fn settle(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(params): Query<DryRunParams>,
+    Query(_params): Query<DryRunParams>,
 ) -> Result<Json<Value>, AppError> {
     authorize_cron_request(&state.config.cron_secret, &headers)?;
     let mut client = state.pool.get().await?;
@@ -371,9 +386,10 @@ pub async fn replay_invoice(
             let settlement_key = settlement_row
                 .map(|r| r.get::<_, String>(0))
                 .unwrap_or_default();
-            let (payout_queued, payout_skip_reason) =
-                if !is_valid_account_public_key(&settlement_key) {
-                    transaction
+            let (payout_queued, payout_skip_reason) = if !is_valid_account_public_key(
+                &settlement_key,
+            ) {
+                transaction
                         .execute(
                             "INSERT INTO payment_events (invoice_id, event_type, payload) VALUES ($1, $2, $3)",
                             &[
@@ -383,9 +399,9 @@ pub async fn replay_invoice(
                             ],
                         )
                         .await?;
-                    (false, Some("invalid_settlement_public_key"))
-                } else {
-                    let inserted = transaction
+                (false, Some("invalid_settlement_public_key"))
+            } else {
+                let inserted = transaction
                         .execute(
                             "INSERT INTO payouts (invoice_id, merchant_id, destination_public_key, amount_cents, asset_code, asset_issuer)
                              SELECT id, merchant_id, (SELECT settlement_public_key FROM merchants WHERE merchants.id = invoices.merchant_id),
@@ -395,8 +411,12 @@ pub async fn replay_invoice(
                             &[&invoice.id],
                         )
                         .await?;
-                    if inserted > 0 { (true, None) } else { (false, Some("payout_already_queued")) }
-                };
+                if inserted > 0 {
+                    (true, None)
+                } else {
+                    (false, Some("payout_already_queued"))
+                }
+            };
             transaction.commit().await?;
             Ok(Json(json!({
                 "dryRun": false,
