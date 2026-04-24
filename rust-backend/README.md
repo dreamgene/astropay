@@ -142,3 +142,16 @@ The service reads env vars from:
 - `rust-backend/.env`
 - `../usdc-payment-link-tool/.env.local`
 - `../usdc-payment-link-tool/.env`
+
+## Webhook and reconciliation assumptions
+
+The full breakdown of what the webhook integration guarantees, what it does not, and how each failure mode is handled lives in:
+
+- [docs/reconciliation/webhook-assumptions.md](../docs/reconciliation/webhook-assumptions.md)
+
+Key points for contributors:
+
+- `POST /api/webhooks/stellar` trusts the caller's `transactionHash` — it does not verify against Horizon. Amount/asset/memo validation only happens in the cron reconcile path.
+- `GET /api/cron/reconcile` scans the most recent 50 payment operations on each invoice's destination account. Payments older than that window are not detected automatically — use `POST /api/cron/reconcile/replay` to rescan a single invoice.
+- `GET /api/cron/settle` is not implemented in Rust yet. The TypeScript route handles settlement in production.
+- All three payment-detection paths (`reconcile`, `webhook`, `replay`) converge on the same `WHERE status = 'pending'` guarded DB transaction, making double-fires safe.
